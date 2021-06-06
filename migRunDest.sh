@@ -623,7 +623,7 @@ if [ "$scanAddress" = "" ]
 then
   scanAddress="hprexacs-7sl1q-scan.dbad2.hpr.oraclevcn.com:1521"
 fi
-#parallelDegree=${parallelDegree:-20} # On ne met rien, le degre de parallelisme est choisi automatiquement
+parallelDegree=${parallelDegree:-100} # On ne met rien, le degre de parallelisme est choisi automatiquement
 DOMAIN=$(echo $scanAddress | sed -e "s;^[^\.]*\.\([^\:]*\).*$;\1;")
 SERVICE_NAME=$srcDbName.$DOMAIN
 
