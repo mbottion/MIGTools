@@ -13,12 +13,7 @@ testUnit()
   echo   "    PDB          : $dstPdbName"
   echo   " Parallel        : $PARALLEL"
 
-  exec_sql           "/ as sysdba "        "select 1 from dual ;"                                "  - Connexion SYSDBA a la cible"     
-
-  exec_sql           "$SRC_CONNECT_STRING" "select 1 from dual ;"                                "  - Connexion $MIG_USER a la source" 
-
-  getInvalidObjects  "$SRC_CONNECT_STRING" "$srcPdbName" "Source"
-  getInvalidObjects  "/ as sysdba"         "$dstPdbName" "Cible"
+  checkBeforeCopy
 
   endStep
 }
@@ -141,28 +136,8 @@ order by tablespace_name, file_name;
 }
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-copyAndMigrate()
+checkBeforeCopy()
 {
-  startRun "Copie et migration de la PDB ($srcPdbName@$srcDbName)"
-
-
-  echo   " Base Source "
-  echo   " =========== "
-  echo   "    CDB          : $srcDbName"
-  echo   "    PDB          : $srcPdbName"
-  echo   "    Scan         : $scanAddress"
-  echo   "    Service      : $SERVICE_NAME"
-  echo   " Base cible "
-  echo   " =========== "
-  echo   "    CDB          : $dstDbName"
-  echo   "    PDB          : $dstPdbName"
-  echo   " Parallel        : $PARALLEL"
-  # 
-  # -----------------------------------------------------------------------------------------
-  # 
-
-  startStep "Verifications et preparation"
-
   exec_sql           "/ as sysdba "        "select 1 from dual ;"                                "  - Connexion SYSDBA a la cible"     \
           || die "Unable to connect to the database"
 
@@ -202,6 +177,40 @@ using   '//$scanAddress/$SERVICE_NAME' ;"                                       
                   || { echo "Existante" ; srcPdbExists=Y ; }
 
 
+  wrl=$(exec_sql "/ as sysdba" "select wrl_parameter from v\$encryption_wallet where con_id=1;")
+ 
+  echo
+  echo "    TDE : $wrl"
+  printf "%-75s : " "  - Verification du mot de passe TDE"
+  echo $keyStorePassword |  mkstore -wrl $wrl -list >/dev/null
+  [ $? -eq 0 ] && { echo "OK" ; } ||  { echo "Erreur" ; die "Mot de passe TDE invalide" ; }
+}
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+copyAndMigrate()
+{
+  startRun "Copie et migration de la PDB ($srcPdbName@$srcDbName)"
+
+
+  echo   " Base Source "
+  echo   " =========== "
+  echo   "    CDB          : $srcDbName"
+  echo   "    PDB          : $srcPdbName"
+  echo   "    Scan         : $scanAddress"
+  echo   "    Service      : $SERVICE_NAME"
+  echo   " Base cible "
+  echo   " =========== "
+  echo   "    CDB          : $dstDbName"
+  echo   "    PDB          : $dstPdbName"
+  echo   " Parallel        : $PARALLEL"
+  # 
+  # -----------------------------------------------------------------------------------------
+  # 
+
+  startStep "Verifications et preparation"
+
+  checkBeforeCopy
+
   if  [ "$aRelancerEnBatch" = "Y" ]
   then
     echo
@@ -227,15 +236,43 @@ using   '//$scanAddress/$SERVICE_NAME' ;"                                       
     export aRelancerEnBatch=N
     rm -f $LOG_FILE
     nohup $0 -d $srcDbName -p $srcPdbName -D $dstDbName -P $dstPdbName >/dev/null 2>&1 &
-    echo " Script relance ....."
+    pid=$!
+    waitFor=30
+    echo " Script relance ..... (pid=$!) surveillance du process ($waitFor) secondes"
+    echo -n "  Surveillance de $pid --> "
+    i=1
+    while [ $i -le $waitFor ]
+    do
+      sleep 1
+      if ps -p $pid >/dev/null
+      then
+        [ $(($i % 10)) -eq 0 ] && { echo -n "+" ; } || { echo -n "." ; }
+      else
+         echo "Processus termine (erreur probable)"
+         echo 
+         echo "      --+--> Fin du fichier LOG"
+         tail -15 $LOG_FILE | sed -e "s;^;        | ;"
+         echo "        +----------------------"
+
+         die "Le processus batch s'est arrete" 
+      fi
+      i=$(($i + 1))
+    done  
+    echo
+    echo
+    echo "+===========================================================================+"
+    echo "La copie semble avoir ete lancee correctemenent"
     echo "+===========================================================================+"
     exit
   fi
+
 
   getParameters      "$SRC_CONNECT_STRING" "$srcPdbName" "Source"
   getDatafiles       "$SRC_CONNECT_STRING" "$srcPdbName" "Source"
   getInvalidObjects  "$SRC_CONNECT_STRING" "$srcPdbName" "Source"
 
+
+sleep 100
   endStep 
 
   # 
@@ -247,6 +284,11 @@ using   '//$scanAddress/$SERVICE_NAME' ;"                                       
 
   if [ "$dstPdbExists" = "N" ]
   then
+echo "
+create pluggable database $dstPdbName
+from  ${srcPdbName}@$DBLINK $PARALLEL
+keystore identified by \"$keyStorePassword\" ;
+"
     exec_sql       "/ as sysdba "      "
 create pluggable database $dstPdbName
 from  ${srcPdbName}@$DBLINK $PARALLEL
@@ -536,7 +578,8 @@ Usage :
          srcPdbName   : PDB Source
          dstDbName    : Base Cible (DB NAME)     : Defaut (deduit de la source)
          dstPdbName   : PDB Cible                : Defaut la meme que la source
-         keyStorePass : MOt de passe TDE
+         keyStorePass : MOt de passe TDE Cible, necessaire seulement
+                        si on ne peut pas le recuperer dans le Wallet
          scan         : Adresse Scan (host:port) : Defaut HPR
          degreParal   : Parallelisme             : Defaut 20
          -C           : Copie et migration d'une base (le script se relance
@@ -607,9 +650,26 @@ then
   dstPdbName=${srcPdbName}
 fi
 #
-#   Mot de passe TDE
+#   Mot de passe TDE s'il n'est pas fourni, on tente
+# de le recuperer dans le dbaas Wallet
 #
-keyStorePassword=${keyStorePassword:-Wel_Come_12}
+if [ "$keyStorePassword" = "" ]
+then
+  if [ -d /acfs01/dbaas_acfs/$ORACLE_UNQNAME/db_wallet ]
+  then
+    dir=/acfs01/dbaas_acfs/$ORACLE_UNQNAME/db_wallet
+  elif [ -d /acfs01/dbaas_acfs/$ORACLE_SID/db_wallet ]
+  then
+    dir=/acfs01/dbaas_acfs/$ORACLE_SID/db_wallet
+  elif [ -d /acfs01/dbaas_acfs/$(echo $ORACLE_SID|sed -e "s;.$;;")/db_wallet ]
+  then
+    dir=/acfs01/dbaas_acfs/$(echo $ORACLE_SID|sed -e "s;.$;;")/db_wallet
+  else
+    die "Impossible de trouver le repertoire du Wallet dbaas, utiliser l'option -k pour fourir le mot de passe TDE de la base cible"
+  fi
+  keyStorePassword=$(mkstore -wrl $dir -viewEntry tde_ks_passwd | grep tde_ks_passwd | cut -f2 -d"=" | sed -e "s;^ *;;")
+fi
+[ "$keyStorePassword" = "" ] && die "Mot de passe TDE inconnu, utiliser -"
 #
 #   Mode de fonctionnement
 #
@@ -623,7 +683,8 @@ if [ "$scanAddress" = "" ]
 then
   scanAddress="hprexacs-7sl1q-scan.dbad2.hpr.oraclevcn.com:1521"
 fi
-parallelDegree=${parallelDegree:-100} # On ne met rien, le degre de parallelisme est choisi automatiquement
+
+parallelDegree=${parallelDegree:-20}
 DOMAIN=$(echo $scanAddress | sed -e "s;^[^\.]*\.\([^\:]*\).*$;\1;")
 SERVICE_NAME=$srcDbName.$DOMAIN
 
