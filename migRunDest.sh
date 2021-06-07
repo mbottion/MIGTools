@@ -14,6 +14,7 @@ testUnit()
   echo   " Parallel        : $PARALLEL"
 
   checkBeforeCopy
+  recompEtVuesMat
 
   endStep
 }
@@ -115,7 +116,6 @@ set heading on
 set feedback on
 
 break on tablespace_name skip 1 on report
-compute sum of size_GB on tablespace_name 
 compute sum of size_GB on report
 
 column tablespace_name format a30
@@ -271,8 +271,6 @@ copyAndMigrate()
   getDatafiles       "$SRC_CONNECT_STRING" "$srcPdbName" "Source"
   getInvalidObjects  "$SRC_CONNECT_STRING" "$srcPdbName" "Source"
 
-
-sleep 100
   endStep 
 
   # 
@@ -284,11 +282,6 @@ sleep 100
 
   if [ "$dstPdbExists" = "N" ]
   then
-echo "
-create pluggable database $dstPdbName
-from  ${srcPdbName}@$DBLINK $PARALLEL
-keystore identified by \"$keyStorePassword\" ;
-"
     exec_sql       "/ as sysdba "      "
 create pluggable database $dstPdbName
 from  ${srcPdbName}@$DBLINK $PARALLEL
@@ -340,6 +333,8 @@ keystore identified by \"$keyStorePassword\" ;"                                "
   fi
 
   endStep 
+
+
   # 
   # -----------------------------------------------------------------------------------------
   # 
@@ -368,9 +363,17 @@ select message,time,status,action from pdb_plug_in_violations ;"
   
   getParameters      "/ as sysdba" "$dstPdbName" "Cible"
   getDatafiles       "/ as sysdba" "$dstPdbName" "Cible"
-  getInvalidObjects  "/ as sysdba" "$dstPdbName" "Cible"
+  endStep
 
-  endStep 
+  # 
+  # -----------------------------------------------------------------------------------------
+  # 
+
+  startStep "Recompilation finale et recreation des vues materielises si necessaire"
+  recompEtVuesMat
+  getInvalidObjects  "/ as sysdba" "$dstPdbName" "Cible"
+  endStep
+
   
   # 
   # -----------------------------------------------------------------------------------------
@@ -378,6 +381,112 @@ select message,time,status,action from pdb_plug_in_violations ;"
   
   endRun
 
+}
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+recompEtVuesMat()
+{
+  exec_sql "/ as sysdba" "
+set feedback on
+alter session set container=$dstPdbName ;
+
+set serveroutput on
+
+declare 
+  reste number ;
+  
+  procedure rebuildMV(s in varchar2,v in varchar2) is
+    text varchar2(32767) ;
+    stmt varchar2(32767) ;
+    i number := 1 ;
+    h number ;
+    t number ;
+  begin
+    dbms_metadata.set_transform_param(DBMS_METADATA.SESSION_TRANSFORM,'PRETTY',TRUE);
+    dbms_metadata.set_transform_param(DBMS_METADATA.SESSION_TRANSFORM,'SQLTERMINATOR',TRUE);
+    text :=         regexp_replace(dbms_metadata.get_ddl('MATERIALIZED_VIEW',v,s) 
+                                  ,'^([^(]*)(\([^)]*\))(.*)\$','\1 /* Supprime pour MIg 19C \2*/ \3',1,1,'n'
+                                  );
+    begin 
+      text := text || dbms_metadata.get_dependent_ddl('INDEX',v,s) ;
+    exception when others then null ;
+    end ;
+    begin
+      text := text || dbms_metadata.get_dependent_ddl('COMMENT',v,s) ;
+    exception when others then null ;
+    end ;
+    begin
+      text := text || dbms_metadata.get_dependent_ddl('OBJECT_GRANT',v,s) ;
+    exception when others then null ;
+    end ;
+    stmt := 'x' ;
+    while stmt is not null
+    loop
+      stmt := regexp_substr(text , '[^;]+',1,i) ;
+      if stmt is not null
+      then
+        if upper(stmt) like '%CREATE%MATERIALIZED%'
+        then
+          dbms_output.put_line('.        Drop MV: ' || s || '.'|| v) ;
+          execute immediate 'drop materialized view \"' || s || '\".\"' || v || '\"';
+          dbms_output.put_line('.        Recreation : ' || s || '.'|| v) ;
+        end if ;
+        dbms_output.put_line(' ---> '|| stmt) ;
+        execute immediate stmt ;
+      end if ;
+      i := i+1 ;
+    end loop ;
+  end ;
+begin
+  dbms_output.put_line('.');
+  dbms_output.put_line('.  Traitement post-upgrade');
+  dbms_output.put_line('.  =======================');
+  dbms_output.put_line('.');
+  for invalidSchemas in (select owner,count(*) nb_invalid 
+                         from dba_objects 
+                         where status = 'INVALID' and owner not in ('SYS','PUBLIC')
+                         group by owner
+                        )
+  loop
+    dbms_output.put_line ('.');
+    dbms_output.put_line (rpad(invalidSchemas.owner,20) || ': ' || invalidSchemas.nb_invalid || ' objets invalides') ;
+    if ( invalidSchemas.nb_invalid != 0 )
+    then
+      dbms_output.put_line('.       ====> Recompilation') ;
+      dbms_utility.compile_schema(invalidSchemas.owner) ;
+      select 
+        count(*) 
+      into 
+        reste
+      from 
+        dba_objects 
+      where 
+            status='INVALID' 
+        and owner = invalidSchemas.owner ;
+      dbms_output.put_line('.             Reste : ' || reste || ' Objets invalides') ;
+      if ( reste != 0 )
+      then
+        dbms_output.put_line('.             ====> Rebuild MV') ;
+        for invViews in (select object_name from dba_objects where object_type = 'MATERIALIZED VIEW' and  owner=invalidSchemas.owner and status='INVALID')
+        loop
+          rebuildMV(invalidSchemas.owner , invViews.object_name ) ;
+        end loop ;
+        select 
+          count(*) 
+        into 
+          reste
+        from 
+          dba_objects 
+        where 
+              status='INVALID' 
+          and owner = invalidSchemas.owner ;
+        dbms_output.put_line('.                  Reste : ' || reste || ' Objets invalides') ;
+      end if ;
+    end if ;
+  end loop;
+end ;
+/
+"
 }
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
@@ -650,27 +759,6 @@ then
   dstPdbName=${srcPdbName}
 fi
 #
-#   Mot de passe TDE s'il n'est pas fourni, on tente
-# de le recuperer dans le dbaas Wallet
-#
-if [ "$keyStorePassword" = "" ]
-then
-  if [ -d /acfs01/dbaas_acfs/$ORACLE_UNQNAME/db_wallet ]
-  then
-    dir=/acfs01/dbaas_acfs/$ORACLE_UNQNAME/db_wallet
-  elif [ -d /acfs01/dbaas_acfs/$ORACLE_SID/db_wallet ]
-  then
-    dir=/acfs01/dbaas_acfs/$ORACLE_SID/db_wallet
-  elif [ -d /acfs01/dbaas_acfs/$(echo $ORACLE_SID|sed -e "s;.$;;")/db_wallet ]
-  then
-    dir=/acfs01/dbaas_acfs/$(echo $ORACLE_SID|sed -e "s;.$;;")/db_wallet
-  else
-    die "Impossible de trouver le repertoire du Wallet dbaas, utiliser l'option -k pour fourir le mot de passe TDE de la base cible"
-  fi
-  keyStorePassword=$(mkstore -wrl $dir -viewEntry tde_ks_passwd | grep tde_ks_passwd | cut -f2 -d"=" | sed -e "s;^ *;;")
-fi
-[ "$keyStorePassword" = "" ] && die "Mot de passe TDE inconnu, utiliser -"
-#
 #   Mode de fonctionnement
 #
 mode=${mode:-COPY}
@@ -684,7 +772,7 @@ then
   scanAddress="hprexacs-7sl1q-scan.dbad2.hpr.oraclevcn.com:1521"
 fi
 
-parallelDegree=${parallelDegree:-20}
+parallelDegree=${parallelDegree:-150}
 DOMAIN=$(echo $scanAddress | sed -e "s;^[^\.]*\.\([^\:]*\).*$;\1;")
 SERVICE_NAME=$srcDbName.$DOMAIN
 
@@ -716,11 +804,33 @@ fi
 #    Controles basiques (il faut que l'on puisse poitionner l'environnement
 # base de données cible (et que ce soit la bonne!!!
 # -----------------------------------------------------------------------------
-checkDir $LOG_DIR || die "$LOG_DIR is incorrect"
 
+checkDir $LOG_DIR || die "$LOG_DIR is incorrect"
 [ -f "$HOME/$dstDbName.env" ] || die "$dstDbName.env non existent"
 . "$HOME/$dstDbName.env"
 [ "$(exec_sql "/ as sysdba" "select  name from v\$database;")" != "${dstDbName^^}" ] && die "Environnement mal positionne"
+
+# -----------------------------------------------------------------------------
+#    Récupération du mot de passe TDE
+# -----------------------------------------------------------------------------
+
+if [ "$keyStorePassword" = "" ]
+then
+  if [ -d /acfs01/dbaas_acfs/$ORACLE_UNQNAME/db_wallet ]
+  then
+    dir=/acfs01/dbaas_acfs/$ORACLE_UNQNAME/db_wallet
+  elif [ -d /acfs01/dbaas_acfs/$ORACLE_SID/db_wallet ]
+  then
+    dir=/acfs01/dbaas_acfs/$ORACLE_SID/db_wallet
+  elif [ -d /acfs01/dbaas_acfs/$(echo $ORACLE_SID|sed -e "s;.$;;")/db_wallet ]
+  then
+    dir=/acfs01/dbaas_acfs/$(echo $ORACLE_SID|sed -e "s;.$;;")/db_wallet
+  else
+    die "Impossible de trouver le repertoire du Wallet dbaas, utiliser l'option -k pour fournir le mot de passe TDE de la base cible"
+  fi
+  keyStorePassword=$(mkstore -wrl $dir -viewEntry tde_ks_passwd | grep tde_ks_passwd | cut -f2 -d"=" | sed -e "s;^ *;;")
+fi
+[ "$keyStorePassword" = "" ] && die "Mot de passe TDE inconnu, utiliser -"
 
 # -----------------------------------------------------------------------------
 #      Lancement de l'exécution
