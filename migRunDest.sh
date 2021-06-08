@@ -1,3 +1,9 @@
+VERSION=1.0
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+#
+#   Appelé par l'option -T, permet de tester des parties de script
+#
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 testUnit()
 {
   startStep "Test de fonctionnalites"
@@ -15,361 +21,59 @@ testUnit()
 
   
   checkBeforeCopy
-  getParameters      "$SRC_CONNECT_STRING" "$srcPdbName" "Source"
-  getDatafiles       "$SRC_CONNECT_STRING" "$srcPdbName" "Source"
-  getInvalidObjects  "$SRC_CONNECT_STRING" "$srcPdbName" "Source"
 
   endStep
 }
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-compareParametres()
-{
-  echo
-  echo "  - Parametres ayant des valeurs differentes dans les SPFILES"
-  echo "    ========================================================="
-  echo
-
-exec_sql "/ as sysdba" "
-set feedback on
-col name format a40 trunc
-col inst_id format 9      heading "I"
-col value_src format a30
-col value_dst format a30
-col src_pdb format a10
-col dst_pdb format a10
-set heading on pages 2000
-
-break on name on src_pdb
-with 
-source_parameters as (
-select 
-  * 
-from (
-    SELECT
-        p.name,
-        p.value,
-        p.inst_id,
-        nvl(d.name, 'CDB\$ROOT') pdb_name,
-        p.con_id
-    FROM
-        gv\$system_parameter@$DBLINK  p
-        LEFT OUTER JOIN (
-            SELECT
-                'PDB' name
-                ,con_id
-            FROM
-                v\$pdbs@$DBLINK
-            WHERE
-                name = upper('$srcPdbName')) d ON ( p.con_id = d.con_id )
-      )
-where 
-  con_id in (       SELECT 0      from dual@$DBLINK
-              UNION SELECT con_id FROM v\$pdbs@$DBLINK WHERE  name = upper('$srcPdbName'))
-)
-,target_parameters as (
-select 
-  * 
-from (
-    SELECT
-        p.name,
-        p.value,
-        p.inst_id,
-        nvl(d.name, 'CDB\$ROOT') pdb_name,
-        p.con_id
-    FROM
-        gv\$system_parameter  p
-        LEFT OUTER JOIN (
-            SELECT
-                'PDB' name
-                ,con_id
-            FROM
-                v\$pdbs
-            WHERE
-                name = upper('$dstPdbName')) d ON ( p.con_id = d.con_id )
-      )
-where 
-  con_id in (       SELECT 0      from dual
-              UNION SELECT con_id FROM v\$pdbs WHERE  name = upper('$dstPdbName'))
-)
-select 
-  * 
-from (
-    SELECT
-        nvl(src.name, dst.name)                 name,
-        src.pdb_name                            src_pdb,
-        --dst.pdb_name                            dst_pdb,
-        nvl(src.inst_id, dst.inst_id)           inst_id,
-        src.value                               value_src,
-        dst.value                               value_dst
-     --   ,src.con_id src_con_id
-     --   ,dst.con_id dst_con_id
-    FROM
-        source_parameters  src
-        FULL OUTER JOIN target_parameters  dst ON ( src.name = dst.name
-                                                   AND src.inst_id = dst.inst_id
-                                                   AND src.pdb_name = dst.pdb_name )
-      )
-where 1=1
-  and  value_src != value_dst
-  and name not in ('background_dump_dest'      ,'cluster_interconnects'      ,'control_files'      ,'core_dump_dest'
-                  ,'audit_file_dest'           ,'db_domain'                  ,'db_unique_name'     ,'dg_broker_config_file1'
-                  ,'local_listener'            ,'dg_broker_config_file2'     ,'remote_listener'    ,'service_names'
-                  ,'spfile'                    ,'user_dump_dest')
-  and name not like 'log_archive%'
-ORDER BY
-    1,
-    2,
-    2,
-    4
-/
-
-"
-}
-# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-addServices()
-{
-  echo
-  echo "  - Ajout des services"
-  echo "    ------------------"
-  echo
-  for SERVICE_SUFFIX in art batch api mes
-  do
-    sn=${dstPdbName,,}_${SERVICE_SUFFIX}
-    echo    "    - $sn"
-
-    if [ "$(srvctl status service -d $ORACLE_UNQNAME -s $sn | grep -i "is running")" != "" ]
-    then
-      echo -n "      - Arret           : "
-      srvctl stop  service -d $ORACLE_UNQNAME -s $sn && echo "Ok" || die "Impossible de stopper le service $sn"
-    fi
-
-    if [ "$(srvctl status service -d $ORACLE_UNQNAME -s $sn | grep -i "does not exist")" = "" ]
-    then
-      echo -n "      - Suppression     : "
-      srvctl remove   service -d $ORACLE_UNQNAME -s $sn && echo "Ok" || die "Impossible de supprimer le service $sn"
-    fi
-
-    sidPrefix=$(echo $ORACLE_SID  | sed -e "s;[0-9]$;;")
-    echo -n "      - Creation        : "
-    srvctl add   service -d $ORACLE_UNQNAME -s $sn \
-                         -pdb $dstPdbName \
-                         -preferred ${sidPrefix}1,${sidPrefix}2 \
-                         -clbgoal SHORT \
-                         -rlbgoal SERVICE_TIME \
-                         -failoverretry 30 \
-                         -failoverdelay 10 \
-                         -failovertype AUTO \
-                         -commit_outcome TRUE \
-                         -failover_restore AUTO \
-                         -replay_init_time 1800 \
-                         -retention 86400 \
-                         -notification TRUE \
-                         -drain_timeout 60 \
-                         && echo "Ok" || die "Impossible d'ajouter le service $sn"
-
-    if [ "$(srvctl status service -d $ORACLE_UNQNAME -s $sn | grep -i "does not have defined services")" = "" ]
-    then
-      echo -n "      - Lancement       : "
-      srvctl start service -d $ORACLE_UNQNAME -s $sn && echo "Ok" || die "Impossible d'ajouter le service $sn"
-    else
-      die "Service $sn non cree"
-    fi
-
-  done
-}
-# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-getInvalidObjects()
-{
-  local cnx=$1
-  local pdb=$2
-  local label=$3
-  echo
-  echo " - Objets Invalides sur la base $label"
-  echo "   --------------------------------------------"
-  echo
-  exec_sql      "$cnx" "\
-set pages 2000
-set lines 400
-set trimout on
-set tab off
-set heading on
-set feedback on
-
-column owner       format  a30
-column object_type format a70
-column nb_inv      format 999G999
-
-break on owner skip 1 on object_type on report
-compute sum of nb_inv on owner 
-compute sum of nb_inv on report
-
-alter session set container=$pdb ;
-
-select
-   owner
-  ,object_type
-  ,count(*) nb_inv
-from
-  dba_objects
-where
-      STATUS='INVALID' 
-  and owner not in ('APPQOSSYS','MDSYS','XDB','PUBLIC','WMSYS'
-                   ,'CTXSYS','ORDPLUGINS','ORDSYS','GSMADMIN_INTERNAL')
-group by owner,object_type 
-order by owner,object_type;
-
-                " || die "Erreur a la recuperation des parametres de la $label"
-}
-# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-getParameters()
-{
-  local cnx=$1
-  local pdb=$2
-  local label=$3
-  echo
-  echo " - Parametres non par defaut sur la base $label"
-  echo "   --------------------------------------------"
-  echo
-  exec_sql      "$cnx" "\
-set pages 2000
-set lines 400
-set trimout on
-set tab off
-set heading on
-set feedback on
-
-column name format  a50
-column value format a100 
-
-alter session set container=$pdb ;
-
-select 
-  name
-  ,value
-from 
-  v\$parameter 
-where 
-  isdefault='FALSE' ;
-
-                " || die "Erreur a la recuperation des parametres de la $label"
-}
-# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-getDatafiles()
-{
-  local cnx=$1
-  local pdb=$2
-  local label=$3
-  echo
-  echo " - Liste des tablespaces et fichiers de la base $label"
-  echo "   ----------------------------------------------------"
-  echo
-  exec_sql      "$cnx" "\
-set pages 2000
-set lines 400
-set trimout on
-set tab off
-set heading on
-set feedback on
-
-break on tablespace_name skip 1 on report
-compute sum of size_GB on report
-
-column tablespace_name format a30
-column file_name format a100
-column size_GB  format 999G999G999D99
-
-alter session set container=$pdb ;
-
-select 
-   tablespace_name
-  ,file_name
-  ,bytes/1024/1024/1024 size_GB
-from
-  dba_data_files 
-order by tablespace_name, file_name;
-
-                " || die "Erreur a la recuperation des fichiers de la base $label"
-}
-# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-checkBeforeCopy()
-{
-  exec_sql           "/ as sysdba "        "select 1 from dual ;"                                "  - Connexion SYSDBA a la cible"     \
-          || die "Unable to connect to the database"
-
-  exec_sql           "$SRC_CONNECT_STRING" "select 1 from dual ;"                                "  - Connexion $MIG_USER a la source" \
-          || die "     
-
-          Impossible de se connecter a l'utilisteur de clonage sur le source
-     veuillez executer les commandes suivantes sur la machine source sous le compte oracle (copier/coller)
-
-# --------------------------------------------------------------
-
-. \$HOME/$(echo $srcDbName | cut -f1 -d "_").env && \
-sqlplus / as sysdba <<%%
-drop user $MIG_USER cascade ;
-create user $MIG_USER identified by \"$MIG_PASS\" ;
-grant 
-   create session
-  ,select any dictionary
-  ,create pluggable database
-  ,set container
-to $MIG_USER container=all;
-alter user $MIG_USER set container_data=all container=current;
-%%
-
-# --------------------------------------------------------------
-
-         et relancer l'operation.
-
-                "
-  echo
-
-  exec_sql -no_error "/ as sysdba"         "drop database link $DBLINK ; "                       "  - Suppression database link $DBLINK" 
-
-  exec_sql           "/ as sysdba"         "
-create  database link $DBLINK 
-connect to $MIG_USER identified by \"$MIG_PASS\"
-using   '//$scanAddress/$SERVICE_NAME' ;"                                                        "  - Creation database link $DBLINK" \
-          || die "Impossible  de creer le DATABASE LINK"
-
-
-  exec_sql           "/ as sysdba"         "alter system set global_names=FALSE scope=memory ;"  "  - Global_names=false (memory)" \
-          || die "Impossble de changer la valeur"
-
-  exec_sql           "/ as sysdba"         "select dummy from dual@$DBLINK;"                     "  - Verification du DBLINK" \
-          || die "Impossble de lire via $DBLINK"
-
-  echo
-
-  res=$(exec_sql "/ as sysdba" "select 1 from cdb_pdbs where pdb_name=upper('$dstPdbName');") \
-                || die "Erreur select PDB cible ($res)"
-
-  printf "%-75s : " "  - Existence PDB Cible ($dstPdbName)" 
-  [ "$res" = "" ] && { echo "Non existante" ; dstPdbExists=N ; }  \
-                  || { echo "Existante" ; dstPdbExists=Y ; }
-
-  res=$(exec_sql "$SRC_CONNECT_STRING" "select 1 from cdb_pdbs where pdb_name=upper('$srcPdbName');") \
-                || die "Erreur select PDB SOurce ($res)"
-  printf "%-75s : " "  - Existence PDB Source ($srcPdbName)"
-  [ "$res" = "" ] && { echo "Non existante" ; srcPdbExists=N ; die "La PDB Source n'existe pas" ; }  \
-                  || { echo "Existante" ; srcPdbExists=Y ; }
-
-
-  wrl=$(exec_sql "/ as sysdba" "select wrl_parameter from v\$encryption_wallet where con_id=1;")
- 
-  echo
-  echo "    TDE : $wrl"
-  printf "%-75s : " "  - Verification du mot de passe TDE"
-  echo $keyStorePassword |  mkstore -wrl $wrl -list >/dev/null
-  [ $? -eq 0 ] && { echo "OK" ; } ||  { echo "Erreur" ; die "Mot de passe TDE invalide" ; }
-}
-# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+#       Clonage d'une PDB et migration si nécessaire (-C)
+#
+#
+#    Le paramètres nécéssaires sont:
+#    ==============================
+#
+#    1) le nom de la base source    (-d) : DB UNIQUE NAME complet
+#    2) Le nom de la PDB source     (-p)
+#    3) L'adresse SCAN de la source (-s) : host:port
+#    3) le nom de la base cible     (-D) : Par défaut identique à la 
+#                                          source
+#    4) Le nom de la PDB cible      (-P) : Par défaut identique à la
+#                                          source
+#
+#    Le mode de passe de TDE (-k) est récupéré dans le wallet
+#  dbaas si celui-ci est accessible. Le parallélisme peu être 
+#  contrôlé avec (-L). Si (-i) est spécifié, l'exécution est 
+#  entièrement faite en interactif (attention aux déconnexions)
+#
+#   Fonctionnement
+#   ==============
+#    
+#    Le clonage se fait avec un common user à créer sur la source.
+# si ce common USER n'existe pas, le script s'arrête et propose
+# les commandes à passer sur la ,base source (copie/coller)
+#
+#
+#    A moins que l'option -i ne soit spécifiés dans les paramètres d'appel,
+#  le script, lancé en interactif opère les premières vérifications, puis 
+#  se relance automatiquement en nohup. Après ce lancement, on attend 30
+#  secondes avant de rendre la main pour vérifier qu'il n'y a pas d'erreur 
+#  au début de la copie.
+#
+#    - On récupère de la source, la liste des tablespaces et des fichier
+#      les paramètres dont la valeur n'est pas par défaut, les nombres
+#      dobjets invalides par schéma et type.
+#    - La copie est faite avec un niveau de parallélisme par défaut
+#      on peut le changer avec (-L)
+#    - Si la PDB existe déjà, le cript continue et on passe
+#      a la partie migration.
+#    - La décision de lancer le DB upgrade dépend de l'état de la
+#      base à l'ouverture. Si on est en MIGRATE, on lance dbupgrade
+#    - Apres upgrade:
+#      - Recompilation des schémas, après compilation, si des 
+#        vues matérialisées sont invalides, on les détruit et 
+#        on les recrée.
+#      - LIste des objets invalides, tablespaces et paramètres
+#      - Une dernière liste présente les valeurs de paramètres 
+#        différents entre les deux bases.
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 copyAndMigrate()
 {
@@ -569,6 +273,364 @@ select message,time,status,action from pdb_plug_in_violations ;"
 
 }
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+#
+#     Suppression d'une PDB (-R)
+#
+#    Le paramètres nécéssaires sont:
+#    ==============================
+#
+#    1) le nom de la base cible    (-D) : DB NAME (fichier .env)
+#    2) Le nom de la PDB cible     (-P)
+#
+#    Fonctionnement
+#    ==============
+#
+#    Droppe la PDB si elle existe. Attention à ne pas exécuter ce
+#  script sur une machine source!!!
+#
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+deletePdb()
+{
+  startRun "Suppression PDB $dstPdbName@dstDbName"
+  # 
+  # -----------------------------------------------------------------------------------------
+  # 
+  startStep "Verifications et preparation"
+
+  exec_sql       "/ as sysdba " "select 1 from dual ;"                              "  - Connexion SYSDBA a la cible" \
+          || die "Unable to connect to the database"
+  
+  res=$(exec_sql "/ as sysdba"  "select 1 from v\$pdbs where name=upper('$dstPdbName');") || die "Erreur select PDB cible ($res)"
+  printf "%-75s : " "  - Existence PDB Cible ($dstPdbName)"
+  [ "$res" = "" ] && { echo "Non existante" ; dstPdbExists=N ; die "PDB Inexistante" ; }  \
+                  || { echo "Existante" ; dstPdbExists=Y ; }
+  
+  endStep
+  # 
+  # -----------------------------------------------------------------------------------------
+  # 
+  startStep "Suppression PDB"
+  
+  exec_sql       "/ as sysdba " "alter pluggable database $dstPdbName close immediate instances=all ; " "     - Fermeture PDB" || die
+  exec_sql       "/ as sysdba " "drop pluggable database $dstPdbName including datafiles ; "            "     - Suppression PDB" || die
+
+  endStep
+
+  # 
+  # -----------------------------------------------------------------------------------------
+  # 
+
+  endRun
+}
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+#
+#     Vérification des pré-requis avant de réaliser une opération
+#
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+checkBeforeCopy()
+{
+  exec_sql           "/ as sysdba "        "select 1 from dual ;"                                "  - Connexion SYSDBA a la cible"     \
+          || die "Unable to connect to the database"
+
+  exec_sql           "$SRC_CONNECT_STRING" "select 1 from dual ;"                                "  - Connexion $MIG_USER a la source" \
+          || die "     
+
+          Impossible de se connecter a l'utilisteur de clonage sur le source
+     veuillez executer les commandes suivantes sur la machine source sous le compte oracle (copier/coller)
+
+# --------------------------------------------------------------
+
+. \$HOME/$(echo $srcDbName | cut -f1 -d "_").env && \
+sqlplus / as sysdba <<%%
+drop user $MIG_USER cascade ;
+create user $MIG_USER identified by \"$MIG_PASS\" ;
+grant 
+   create session
+  ,select any dictionary
+  ,create pluggable database
+  ,set container
+to $MIG_USER container=all;
+alter user $MIG_USER set container_data=all container=current;
+%%
+
+# --------------------------------------------------------------
+
+         et relancer l'operation.
+
+                "
+  echo
+
+  exec_sql -no_error "/ as sysdba"         "drop database link $DBLINK ; "                       "  - Suppression database link $DBLINK" 
+
+  exec_sql           "/ as sysdba"         "
+create  database link $DBLINK 
+connect to $MIG_USER identified by \"$MIG_PASS\"
+using   '//$scanAddress/$SERVICE_NAME' ;"                                                        "  - Creation database link $DBLINK" \
+          || die "Impossible  de creer le DATABASE LINK"
+
+
+  exec_sql           "/ as sysdba"         "alter system set global_names=FALSE scope=memory ;"  "  - Global_names=false (memory)" \
+          || die "Impossble de changer la valeur"
+
+  exec_sql           "/ as sysdba"         "select dummy from dual@$DBLINK;"                     "  - Verification du DBLINK" \
+          || die "Impossble de lire via $DBLINK"
+
+  echo
+
+  res=$(exec_sql "/ as sysdba" "select 1 from cdb_pdbs where pdb_name=upper('$dstPdbName');") \
+                || die "Erreur select PDB cible ($res)"
+
+  printf "%-75s : " "  - Existence PDB Cible ($dstPdbName)" 
+  [ "$res" = "" ] && { echo "Non existante" ; dstPdbExists=N ; }  \
+                  || { echo "Existante" ; dstPdbExists=Y ; }
+
+  res=$(exec_sql "$SRC_CONNECT_STRING" "select 1 from cdb_pdbs where pdb_name=upper('$srcPdbName');") \
+                || die "Erreur select PDB SOurce ($res)"
+  printf "%-75s : " "  - Existence PDB Source ($srcPdbName)"
+  [ "$res" = "" ] && { echo "Non existante" ; srcPdbExists=N ; die "La PDB Source n'existe pas" ; }  \
+                  || { echo "Existante" ; srcPdbExists=Y ; }
+
+
+  wrl=$(exec_sql "/ as sysdba" "select wrl_parameter from v\$encryption_wallet where con_id=1;")
+ 
+  echo
+  echo "    TDE : $wrl"
+  printf "%-75s : " "  - Verification du mot de passe TDE"
+  echo $keyStorePassword |  mkstore -wrl $wrl -list >/dev/null
+  [ $? -eq 0 ] && { echo "OK" ; } ||  { echo "Erreur" ; die "Mot de passe TDE invalide" ; }
+}
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+#
+#      Affiche les paramètres ayant des valeurs différentes sur la 
+#  source et la cible. Niveaux CDB et PDB
+#
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+compareParametres()
+{
+  echo
+  echo "  - Parametres ayant des valeurs differentes dans les SPFILES"
+  echo "    ========================================================="
+  echo
+
+exec_sql "/ as sysdba" "
+set feedback on
+col name format a40 trunc
+col inst_id format 9      heading "I"
+col value_src format a30
+col value_dst format a30
+col src_pdb format a10
+col dst_pdb format a10
+set heading on pages 2000
+
+break on name on src_pdb
+with 
+source_parameters as (
+select 
+  * 
+/**/from (
+    SELECT
+        p.name,
+        p.value,
+        p.inst_id,
+        /**/nvl(d.name, 'CDB\$ROOT') pdb_name,
+        p.con_id
+    FROM
+        gv\$system_parameter@$DBLINK  p
+        LEFT OUTER JOIN (
+            SELECT
+                'PDB' name
+                ,con_id
+            FROM
+                v\$pdbs@$DBLINK
+            WHERE
+                name = upper('$srcPdbName')) d ON ( p.con_id = d.con_id )
+      )
+where 
+  con_id in (       SELECT 0      from dual@$DBLINK
+              UNION SELECT con_id FROM v\$pdbs@$DBLINK WHERE  name = upper('$srcPdbName'))
+)
+,target_parameters as (
+select 
+  * 
+/**/from (
+    SELECT
+        p.name,
+        p.value,
+        p.inst_id,
+/**/        nvl(d.name, 'CDB\$ROOT') pdb_name,
+        p.con_id
+    FROM
+        gv\$system_parameter  p
+        LEFT OUTER JOIN (
+            SELECT
+                'PDB' name
+                ,con_id
+            FROM
+                v\$pdbs
+            WHERE
+                name = upper('$dstPdbName')) d ON ( p.con_id = d.con_id )
+      )
+where 
+  con_id in (       SELECT 0      from dual
+              UNION SELECT con_id FROM v\$pdbs WHERE  name = upper('$dstPdbName'))
+)
+select 
+  * 
+/**/from (
+    SELECT
+   /**/     nvl(src.name, dst.name)                 name,
+        src.pdb_name                            src_pdb,
+        --dst.pdb_name                            dst_pdb,
+   /**/     nvl(src.inst_id, dst.inst_id)           inst_id,
+        src.value                               value_src,
+        dst.value                               value_dst
+     --   ,src.con_id src_con_id
+     --   ,dst.con_id dst_con_id
+    FROM
+        source_parameters  src
+        FULL OUTER JOIN target_parameters  dst ON ( src.name = dst.name
+                                                   AND src.inst_id = dst.inst_id
+                                                   AND src.pdb_name = dst.pdb_name )
+      )
+where 1=1
+  and  value_src != value_dst
+  and name not in ('background_dump_dest'      ,'cluster_interconnects'      ,'control_files'      ,'core_dump_dest'
+                  ,'audit_file_dest'           ,'db_domain'                  ,'db_unique_name'     ,'dg_broker_config_file1'
+                  ,'local_listener'            ,'dg_broker_config_file2'     ,'remote_listener'    ,'service_names'
+                  ,'spfile'                    ,'user_dump_dest')
+  and name not like 'log_archive%'
+ORDER BY
+    1,
+    2,
+    2,
+    4
+/
+
+"
+}
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+#     Récupère la liste des paramètres modifiés sur une base
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+getParameters()
+{
+  local cnx=$1
+  local pdb=$2
+  local label=$3
+  echo
+  echo " - Parametres non par defaut sur la base $label"
+  echo "   --------------------------------------------"
+  echo
+  exec_sql      "$cnx" "\
+set pages 2000
+set lines 400
+set trimout on
+set tab off
+set heading on
+set feedback on
+
+column name format  a50
+column value format a100 
+
+alter session set container=$pdb ;
+
+select 
+  name
+  ,value
+from 
+  v\$parameter 
+where 
+  isdefault='FALSE' ;
+
+                " || die "Erreur a la recuperation des parametres de la $label"
+}
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+#     Récupère la liste des fichiers par tablespace
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+getDatafiles()
+{
+  local cnx=$1
+  local pdb=$2
+  local label=$3
+  echo
+  echo " - Liste des tablespaces et fichiers de la base $label"
+  echo "   ----------------------------------------------------"
+  echo
+  exec_sql      "$cnx" "\
+set pages 2000
+set lines 400
+set trimout on
+set tab off
+set heading on
+set feedback on
+
+break on tablespace_name skip 1 on report
+compute sum of size_GB on report
+
+column tablespace_name format a30
+column file_name format a100
+column size_GB  format 999G999G999D99
+
+alter session set container=$pdb ;
+
+select 
+   tablespace_name
+  ,file_name
+  ,bytes/1024/1024/1024 size_GB
+from
+  dba_data_files 
+order by tablespace_name, file_name;
+
+                " || die "Erreur a la recuperation des fichiers de la base $label"
+}
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+#    LIste les objets invalides
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+getInvalidObjects()
+{
+  local cnx=$1
+  local pdb=$2
+  local label=$3
+  echo
+  echo " - Objets Invalides sur la base $label"
+  echo "   --------------------------------------------"
+  echo
+  exec_sql      "$cnx" "\
+set pages 2000
+set lines 400
+set trimout on
+set tab off
+set heading on
+set feedback on
+
+column owner       format  a30
+column object_type format a70
+column nb_inv      format 999G999
+
+break on owner skip 1 on object_type on report
+compute sum of nb_inv on owner 
+compute sum of nb_inv on report
+
+alter session set container=$pdb ;
+
+select
+   owner
+  ,object_type
+  ,count(*) nb_inv
+from
+  dba_objects
+where
+      STATUS='INVALID' 
+  and owner not in ('APPQOSSYS','MDSYS','XDB','PUBLIC','WMSYS'
+                   ,'CTXSYS','ORDPLUGINS','ORDSYS','GSMADMIN_INTERNAL')
+group by owner,object_type 
+order by owner,object_type;
+
+                " || die "Erreur a la recuperation des parametres de la $label"
+}
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+#      Recompile et recrée les vues matérialisées (si nécessaire) en fait, 
+#  c'est juste du PL/SQL!!!
+#  
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 recompEtVuesMat()
 {
@@ -680,41 +742,61 @@ end ;
 "
 }
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+#      Crée ou recrée les 4 services standards
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-deletePdb()
+addServices()
 {
-  startRun "Suppression PDB $dstPdbName@dstDbName"
-  # 
-  # -----------------------------------------------------------------------------------------
-  # 
-  startStep "Verifications et preparation"
+  echo
+  echo "  - Ajout des services"
+  echo "    ------------------"
+  echo
+  for SERVICE_SUFFIX in art batch api mes
+  do
+    sn=${dstPdbName,,}_${SERVICE_SUFFIX}
+    echo    "    - $sn"
 
-  exec_sql       "/ as sysdba " "select 1 from dual ;"                              "  - Connexion SYSDBA a la cible" \
-          || die "Unable to connect to the database"
-  
-  res=$(exec_sql "/ as sysdba"  "select 1 from v\$pdbs where name=upper('$dstPdbName');") || die "Erreur select PDB cible ($res)"
-  printf "%-75s : " "  - Existence PDB Cible ($dstPdbName)"
-  [ "$res" = "" ] && { echo "Non existante" ; dstPdbExists=N ; die "PDB Inexistante" ; }  \
-                  || { echo "Existante" ; dstPdbExists=Y ; }
-  
-  endStep
-  # 
-  # -----------------------------------------------------------------------------------------
-  # 
-  startStep "Suppression PDB"
-  
-  exec_sql       "/ as sysdba " "alter pluggable database $dstPdbName close immediate instances=all ; " "     - Fermeture PDB" || die
-  exec_sql       "/ as sysdba " "drop pluggable database $dstPdbName including datafiles ; "            "     - Suppression PDB" || die
+    if [ "$(srvctl status service -d $ORACLE_UNQNAME -s $sn | grep -i "is running")" != "" ]
+    then
+      echo -n "      - Arret           : "
+      srvctl stop  service -d $ORACLE_UNQNAME -s $sn && echo "Ok" || die "Impossible de stopper le service $sn"
+    fi
 
-  endStep
+    if [ "$(srvctl status service -d $ORACLE_UNQNAME -s $sn | grep -i "does not exist")" = "" ]
+    then
+      echo -n "      - Suppression     : "
+      srvctl remove   service -d $ORACLE_UNQNAME -s $sn && echo "Ok" || die "Impossible de supprimer le service $sn"
+    fi
 
-  # 
-  # -----------------------------------------------------------------------------------------
-  # 
+    sidPrefix=$(echo $ORACLE_SID  | sed -e "s;[0-9]$;;")
+    echo -n "      - Creation        : "
+    srvctl add   service -d $ORACLE_UNQNAME -s $sn \
+                         -pdb $dstPdbName \
+                         -preferred ${sidPrefix}1,${sidPrefix}2 \
+                         -clbgoal SHORT \
+                         -rlbgoal SERVICE_TIME \
+                         -failoverretry 30 \
+                         -failoverdelay 10 \
+                         -failovertype AUTO \
+                         -commit_outcome TRUE \
+                         -failover_restore AUTO \
+                         -replay_init_time 1800 \
+                         -retention 86400 \
+                         -notification TRUE \
+                         -drain_timeout 60 \
+                         && echo "Ok" || die "Impossible d'ajouter le service $sn"
 
-  endRun
+    if [ "$(srvctl status service -d $ORACLE_UNQNAME -s $sn | grep -i "does not have defined services")" = "" ]
+    then
+      echo -n "      - Lancement       : "
+      srvctl start service -d $ORACLE_UNQNAME -s $sn && echo "Ok" || die "Impossible d'ajouter le service $sn"
+    else
+      die "Service $sn non cree"
+    fi
+
+  done
 }
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+#     Trace
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 startRun()
 {
@@ -728,6 +810,7 @@ startRun()
   echo
 }
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+#     Trace
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 endRun()
 {
@@ -745,6 +828,7 @@ endRun()
   echo   "========================================================================================" 
 }
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+#     Trace
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 startStep()
 {
@@ -758,6 +842,7 @@ startStep()
   echo
 }
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+#     Trace
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 endStep()
 {
@@ -773,6 +858,7 @@ endStep()
   echo "       - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - "
 }
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+#     Abort du programme
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 die() 
 {
@@ -782,6 +868,7 @@ ERROR :
   exit 1
 }
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+#      Exécute du SQL avec contrôle d'erreur et de format
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 exec_sql()
 {
@@ -847,6 +934,7 @@ $bloc_sql
   return $status
 }
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+#     Teste un répertoire et le crée
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 checkDir()
 {
@@ -864,6 +952,7 @@ checkDir()
   return 0
 }
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+#  Usage
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 usage() 
 {
@@ -874,14 +963,15 @@ Usage :
          [-k keyStorePass] [-s scan] [-L degreParal]  
          [-C|-R] [-h|-?]
 
-         srcDbName    : Base source (db Unique Name)
+         srcDbName    : Base source (db Unique Name complet)
          srcPdbName   : PDB Source
-         dstDbName    : Base Cible (DB NAME)     : Defaut (deduit de la source)
+         dstDbName    : Base Cible (DB NAME)     : Defaut (deduit de la source, 
+                                                   DBNAME seulement)
          dstPdbName   : PDB Cible                : Defaut la meme que la source
          keyStorePass : MOt de passe TDE Cible, necessaire seulement
                         si on ne peut pas le recuperer dans le Wallet
          scan         : Adresse Scan (host:port) : Defaut HPR
-         degreParal   : Parallelisme             : Defaut 20
+         degreParal   : Parallelisme             : Defaut 150
          -C           : Copie et migration d'une base (le script se relance
                         en nohup apres que les premieres verifications sont faites
                         sauf si -i est precise)
@@ -889,6 +979,8 @@ Usage :
          -i           : Ne relance pas le script en Nohup 
                         (pour enchainer par exemple)
          -?|-h        : Aide
+
+  Version : $VERSION
   "
   exit
 }
@@ -943,17 +1035,18 @@ srcPdbName=${srcPdbName:-TST1}
 #
 if [ "$dstDbName" = "" ]
 then
-  dstDbName=$(echo $srcDbName | cut -f1 -d"_")
+  dstDbName=$(echo $srcDbName | cut -f1 -d"_")   # Par défaut, on prend la partie DBNAME du DB UNIQUE name Source
 fi
 if [ "$dstPdbName" = "" ]
 then
-  dstPdbName=${srcPdbName}
+  dstPdbName=${srcPdbName}                       # Par défaut, identique à la source
 fi
 #
 #   Mode de fonctionnement
 #
-mode=${mode:-COPY}
-aRelancerEnBatch=${aRelancerEnBatch:-Y}
+mode=${mode:-COPY}                               # Par défaut Copie
+aRelancerEnBatch=${aRelancerEnBatch:-Y}          # Par défaut, le script de realne en nohup après les
+                                                 # vérifications (pour la copie seulement)
 #
 #   Adresse SCAN (Par défaut, HPR) DOMAINE=même domaine que
 # le scan.
@@ -963,8 +1056,8 @@ then
   scanAddress="hprexacs-7sl1q-scan.dbad2.hpr.oraclevcn.com:1521"
 fi
 
-parallelDegree=${parallelDegree:-150}
-DOMAIN=$(echo $scanAddress | sed -e "s;^[^\.]*\.\([^\:]*\).*$;\1;")
+parallelDegree=${parallelDegree:-150}            # Défaut 150
+DOMAIN=$(echo $scanAddress | sed -e "s;^[^\.]*\.\([^\:]*\).*$;\1;")  # Domaine du Scan
 SERVICE_NAME=$srcDbName.$DOMAIN
 
 # -----------------------------------------------------------------------------
