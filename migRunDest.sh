@@ -1071,7 +1071,7 @@ DAT=$(date +%Y%m%d_%H%M)                     # DATE (for filenames)
 BASEDIR=$HOME/migrate19                      # Base dir for logs & files
 LOG_DIR=$BASEDIR/$srcDbName                  # Log DIR
 MIG_USER="C##PDBCLONE"                       # Cible du DBLINK
-MIG_PASS="SBT48UMwPJIjsFUilwFz"              # MOt de passe
+MIG_PASS="SBT48UMw@_PJIjsFUilwFz"            # MOt de passe
 SRC_CONNECT_STRING="\"$MIG_USER\"/\"$MIG_PASS\"@//$scanAddress/$SERVICE_NAME"
 
 if [ "$LOG_FILE" = "" ]
