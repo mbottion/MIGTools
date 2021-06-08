@@ -13,10 +13,171 @@ testUnit()
   echo   "    PDB          : $dstPdbName"
   echo   " Parallel        : $PARALLEL"
 
+  
   checkBeforeCopy
-  recompEtVuesMat
+  getParameters      "$SRC_CONNECT_STRING" "$srcPdbName" "Source"
+  getDatafiles       "$SRC_CONNECT_STRING" "$srcPdbName" "Source"
+  getInvalidObjects  "$SRC_CONNECT_STRING" "$srcPdbName" "Source"
 
   endStep
+}
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+compareParametres()
+{
+  echo
+  echo "  - Parametres ayant des valeurs differentes dans les SPFILES"
+  echo "    ========================================================="
+  echo
+
+exec_sql "/ as sysdba" "
+set feedback on
+col name format a40 trunc
+col inst_id format 9      heading "I"
+col value_src format a30
+col value_dst format a30
+col src_pdb format a10
+col dst_pdb format a10
+set heading on pages 2000
+
+break on name on src_pdb
+with 
+source_parameters as (
+select 
+  * 
+from (
+    SELECT
+        p.name,
+        p.value,
+        p.inst_id,
+        nvl(d.name, 'CDB\$ROOT') pdb_name,
+        p.con_id
+    FROM
+        gv\$system_parameter@$DBLINK  p
+        LEFT OUTER JOIN (
+            SELECT
+                'PDB' name
+                ,con_id
+            FROM
+                v\$pdbs@$DBLINK
+            WHERE
+                name = upper('$srcPdbName')) d ON ( p.con_id = d.con_id )
+      )
+where 
+  con_id in (       SELECT 0      from dual@$DBLINK
+              UNION SELECT con_id FROM v\$pdbs@$DBLINK WHERE  name = upper('$srcPdbName'))
+)
+,target_parameters as (
+select 
+  * 
+from (
+    SELECT
+        p.name,
+        p.value,
+        p.inst_id,
+        nvl(d.name, 'CDB\$ROOT') pdb_name,
+        p.con_id
+    FROM
+        gv\$system_parameter  p
+        LEFT OUTER JOIN (
+            SELECT
+                'PDB' name
+                ,con_id
+            FROM
+                v\$pdbs
+            WHERE
+                name = upper('$dstPdbName')) d ON ( p.con_id = d.con_id )
+      )
+where 
+  con_id in (       SELECT 0      from dual
+              UNION SELECT con_id FROM v\$pdbs WHERE  name = upper('$dstPdbName'))
+)
+select 
+  * 
+from (
+    SELECT
+        nvl(src.name, dst.name)                 name,
+        src.pdb_name                            src_pdb,
+        --dst.pdb_name                            dst_pdb,
+        nvl(src.inst_id, dst.inst_id)           inst_id,
+        src.value                               value_src,
+        dst.value                               value_dst
+     --   ,src.con_id src_con_id
+     --   ,dst.con_id dst_con_id
+    FROM
+        source_parameters  src
+        FULL OUTER JOIN target_parameters  dst ON ( src.name = dst.name
+                                                   AND src.inst_id = dst.inst_id
+                                                   AND src.pdb_name = dst.pdb_name )
+      )
+where 1=1
+  and  value_src != value_dst
+  and name not in ('background_dump_dest'      ,'cluster_interconnects'      ,'control_files'      ,'core_dump_dest'
+                  ,'audit_file_dest'           ,'db_domain'                  ,'db_unique_name'     ,'dg_broker_config_file1'
+                  ,'local_listener'            ,'dg_broker_config_file2'     ,'remote_listener'    ,'service_names'
+                  ,'spfile'                    ,'user_dump_dest')
+  and name not like 'log_archive%'
+ORDER BY
+    1,
+    2,
+    2,
+    4
+/
+
+"
+}
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+addServices()
+{
+  echo
+  echo "  - Ajout des services"
+  echo "    ------------------"
+  echo
+  for SERVICE_SUFFIX in art batch api mes
+  do
+    sn=${dstPdbName,,}_${SERVICE_SUFFIX}
+    echo    "    - $sn"
+
+    if [ "$(srvctl status service -d $ORACLE_UNQNAME -s $sn | grep -i "is running")" != "" ]
+    then
+      echo -n "      - Arret           : "
+      srvctl stop  service -d $ORACLE_UNQNAME -s $sn && echo "Ok" || die "Impossible de stopper le service $sn"
+    fi
+
+    if [ "$(srvctl status service -d $ORACLE_UNQNAME -s $sn | grep -i "does not exist")" = "" ]
+    then
+      echo -n "      - Suppression     : "
+      srvctl remove   service -d $ORACLE_UNQNAME -s $sn && echo "Ok" || die "Impossible de supprimer le service $sn"
+    fi
+
+    sidPrefix=$(echo $ORACLE_SID  | sed -e "s;[0-9]$;;")
+    echo -n "      - Creation        : "
+    srvctl add   service -d $ORACLE_UNQNAME -s $sn \
+                         -pdb $dstPdbName \
+                         -preferred ${sidPrefix}1,${sidPrefix}2 \
+                         -clbgoal SHORT \
+                         -rlbgoal SERVICE_TIME \
+                         -failoverretry 30 \
+                         -failoverdelay 10 \
+                         -failovertype AUTO \
+                         -commit_outcome TRUE \
+                         -failover_restore AUTO \
+                         -replay_init_time 1800 \
+                         -retention 86400 \
+                         -notification TRUE \
+                         -drain_timeout 60 \
+                         && echo "Ok" || die "Impossible d'ajouter le service $sn"
+
+    if [ "$(srvctl status service -d $ORACLE_UNQNAME -s $sn | grep -i "does not have defined services")" = "" ]
+    then
+      echo -n "      - Lancement       : "
+      srvctl start service -d $ORACLE_UNQNAME -s $sn && echo "Ok" || die "Impossible d'ajouter le service $sn"
+    else
+      die "Service $sn non cree"
+    fi
+
+  done
 }
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
@@ -142,8 +303,31 @@ checkBeforeCopy()
           || die "Unable to connect to the database"
 
   exec_sql           "$SRC_CONNECT_STRING" "select 1 from dual ;"                                "  - Connexion $MIG_USER a la source" \
-          || die "Unable to connect to the database"
+          || die "     
 
+          Impossible de se connecter a l'utilisteur de clonage sur le source
+     veuillez executer les commandes suivantes sur la machine source sous le compte oracle (copier/coller)
+
+# --------------------------------------------------------------
+
+. \$HOME/$(echo $srcDbName | cut -f1 -d "_").env && \
+sqlplus / as sysdba <<%%
+drop user $MIG_USER cascade ;
+create user $MIG_USER identified by \"$MIG_PASS\" ;
+grant 
+   create session
+  ,select any dictionary
+  ,create pluggable database
+  ,set container
+to $MIG_USER container=all;
+alter user $MIG_USER set container_data=all container=current;
+%%
+
+# --------------------------------------------------------------
+
+         et relancer l'operation.
+
+                "
   echo
 
   exec_sql -no_error "/ as sysdba"         "drop database link $DBLINK ; "                       "  - Suppression database link $DBLINK" 
@@ -372,6 +556,8 @@ select message,time,status,action from pdb_plug_in_violations ;"
   startStep "Recompilation finale et recreation des vues materielises si necessaire"
   recompEtVuesMat
   getInvalidObjects  "/ as sysdba" "$dstPdbName" "Cible"
+  compareParametres
+  addServices
   endStep
 
   
@@ -427,12 +613,17 @@ declare
       then
         if upper(stmt) like '%CREATE%MATERIALIZED%'
         then
-          dbms_output.put_line('.        Drop MV: ' || s || '.'|| v) ;
-          execute immediate 'drop materialized view \"' || s || '\".\"' || v || '\"';
-          dbms_output.put_line('.        Recreation : ' || s || '.'|| v) ;
+          dbms_output.put_line('.                Drop MV: ' || s || '.'|| v) ;
+            execute immediate 'drop materialized view \"' || s || '\".\"' || v || '\"';
+            dbms_output.put_line('.                Recreation : ' || s || '.'|| v) ;
         end if ;
-        dbms_output.put_line(' ---> '|| stmt) ;
-        execute immediate stmt ;
+        --dbms_output.put_line(' ---> '|| stmt) ;
+        begin
+          execute immediate stmt ;
+        exception when others then
+          dbms_output.put_line('.                Erreur a l''execution de : ' || stmt) ;
+          raise ;
+        end ;
       end if ;
       i := i+1 ;
     end loop ;
@@ -787,7 +978,7 @@ DAT=$(date +%Y%m%d_%H%M)                     # DATE (for filenames)
 BASEDIR=$HOME/migrate19                      # Base dir for logs & files
 LOG_DIR=$BASEDIR/$srcDbName                  # Log DIR
 MIG_USER="C##PDBCLONE"                       # Cible du DBLINK
-MIG_PASS="Wel_Come_12"                       # MOt de passe
+MIG_PASS="SBT48UMwPJIjsFUilwFz"              # MOt de passe
 SRC_CONNECT_STRING="\"$MIG_USER\"/\"$MIG_PASS\"@//$scanAddress/$SERVICE_NAME"
 
 if [ "$LOG_FILE" = "" ]
