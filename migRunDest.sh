@@ -1,4 +1,4 @@
-VERSION=1.0
+VERSION=1.1
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 #
 #   Appelé par l'option -T, permet de tester des parties de script
@@ -108,8 +108,7 @@ copyAndMigrate()
     echo "+===========================================================================+"
     echo
     echo "  Le fichier log sera:"
-    echo "       $(basename $LOG_FILE)"
-    echo "  dans $(dirname  $LOG_FILE)"
+    echo "   $LOG_FILE"
     echo 
     echo "+===========================================================================+"
 
@@ -170,9 +169,14 @@ copyAndMigrate()
 
   if [ "$dstPdbExists" = "N" ]
   then
+    createFileDestClause=""
+    if  [ "$dstDiskGroup" != "" ]
+    then
+      createFileDestClause="create_file_dest='$dstDiskGroup'"
+    fi
     exec_sql       "/ as sysdba "      "
 create pluggable database $dstPdbName
-from  ${srcPdbName}@$DBLINK $PARALLEL
+from  ${srcPdbName}@$DBLINK $PARALLEL $createFileDestClause
 keystore identified by \"$keyStorePassword\" ;"                                "     - Recopie de ${srcPdbName}@$DBLINK dans $dstPdbName" \
             || die "Erreur de copie de la PDB"
   else
@@ -257,7 +261,7 @@ select message,time,status,action from pdb_plug_in_violations ;"
   # -----------------------------------------------------------------------------------------
   # 
 
-  startStep "Recompilation finale et recreation des vues materielises si necessaire"
+  startStep "Recompilation finale et recreation des vues materialisees si necessaire"
   recompEtVuesMat
   getInvalidObjects  "/ as sysdba" "$dstPdbName" "Cible"
   compareParametres
@@ -956,11 +960,11 @@ checkDir()
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 usage() 
 {
- echo "
+ echo " $*
 
 Usage :
  $SCRIPT [-d srcDbName] [-p srcPdbName] [-D dstDbName] [-P dstPdbName] 
-         [-k keyStorePass] [-s scan] [-L degreParal]  
+         [-k keyStorePass] [-s scan] [-L degreParal]  [-G diskGroup]
          [-C|-R] [-h|-?]
 
          srcDbName    : Base source (db Unique Name complet)
@@ -970,6 +974,8 @@ Usage :
          dstPdbName   : PDB Cible                : Defaut la meme que la source
          keyStorePass : MOt de passe TDE Cible, necessaire seulement
                         si on ne peut pas le recuperer dans le Wallet
+         diskGroup    : DB_CREATE_FILE_Dest de 
+                        la cible                 : Defaut inchange
          scan         : Adresse Scan (host:port) : Defaut HPR
          degreParal   : Parallelisme             : Defaut 150
          -C           : Copie et migration d'une base (le script se relance
@@ -994,7 +1000,7 @@ SCRIPT=migRunDest.sh
 
 [ "$1" = "" ] && usage
 toShift=0
-while getopts :d:p:D:P:k:s:L:CRTi opt
+while getopts d:p:D:P:k:s:L:G:CRTi opt
 do
   case $opt in
    # --------- Source Database --------------------------------
@@ -1007,13 +1013,14 @@ do
    k)   keyStorePassword=$OPTARG ; toShift=$(($toShift + 2)) ;;
    s)   scanAddress=$OPTARG      ; toShift=$(($toShift + 2)) ;;
    L)   parallelDegree=$OPTARG   ; toShift=$(($toShift + 2)) ;;
+   G)   dstDiskGroup=$OPTARG     ; toShift=$(($toShift + 2)) ;;
    # --------- Modes de fonctionnement ------------------------
    C)   mode=COPY                ; toShift=$(($toShift + 1)) ;;
    R)   mode=DELETE              ; toShift=$(($toShift + 1)) ;;
    T)   mode=TEST                ; toShift=$(($toShift + 1)) ;;
    i)   aRelancerEnBatch=N       ; toShift=$(($toShift + 1)) ;;
    # --------- Usage ------------------------------------------
-   ?|h) usage ;;
+   ?|h) usage "Aide demandee";;
   esac
 done
 shift $toShift 
