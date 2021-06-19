@@ -378,6 +378,19 @@ createDG()
   if [ "$dbRole" = "PRIMARY" ]
   then
     createOnPrimary
+    echo "
+
+========================================================================
+
+    La preparation de la base primaire est maintenant terminee, la
+suite des operations de déroule depuis la machine stand-by.
+
+    Connectez-vous à la machine de secours (noeud 1) et lancez :
+
+  $SCRIPT RunOnStandBY -d $primDbUniqueName -D $stbyDbUniqueName -s $scanLocal
+
+========================================================================
+"
   else
     dir "Je ne sais pas (encore) faire !"
   fi
