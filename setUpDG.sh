@@ -1,4 +1,4 @@
-VERSION=0.1
+VERSION=0.2
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 #
 #   Appelé par l'option -T, permet de tester des parties de script
@@ -7,6 +7,24 @@ VERSION=0.1
 testUnit()
 {
   startStep "Test de fonctionnalites"
+  endStep
+}
+duplicateDBForStandBY()
+{
+  startStep "Preparation de la base"
+
+  tnsAliasesForDG $stbyDbUniqueName $hostOppose $portOppose $serviceStandBy  $domaineStandBy \
+                  $primDbUniqueName $hostLocal  $portLocal  $servicePrimaire $domainePrimaire 
+
+  echo "  - Recopie TNSNAMES sur autre noeud"
+  otherNode=$(srvctl status database -d $ORACLE_UNQNAME | grep -v $(hostname -s) | sed -e "s;^.*on node ;;")
+  printf "%-75s : " "    - Copie sur $otherNode"
+  scp -o StrictHostKeyChecking=no $TNS_ADMIN/tnsnames.ora ${otherNode}:$TNS_ADMIN \
+    && echo "Ok" \
+    || die "Impossible de copie le TNSNAMES sur $otherNode"
+  endStep
+
+  startStep "Duplication de la base de donnees"
   endStep
 }
 createOnPrimary()
@@ -363,11 +381,28 @@ createDG()
   echo "  - Base STANDBY     : $stbyDbName ($stbyDbUniqueName)"
   echo "    --> $tnsStandBy"
   echo "  - TNS_ADMIN        : $TNS_ADMIN"
+  echo "  - Execution sur    : $opePart"
   echo
   echo "==============================================================="
   echo
-  printf "%-75s : " "  - Role de la base $primDbName" 
-  if [ "$(ps -ef | grep "smon_${primDbName}" | grep -v grep | wc -l)" = "1" ]
+
+  if [ "$opePart" = "STANDBY" ]
+  then
+    echo "  - On est sur la machine stand-by, la base ne doit pas pouvoir etre lancee"
+    if [ "$(srvctl status database -d $stbyDbUniqueName | grep -i running | grep -vi "not running")" != "" ]
+    then
+      echo "    - La base est lancee, ... pas bon"
+    else
+      echo "    - La base n'est pas lancee, on essaie de la demarrer"
+      srvctl start database -d $stbyDbUniqueName >/dev/null 2>&1
+    fi
+    laBase=$stbyDbUniqueName
+  else
+    laBase=$primDbUniqueName
+  fi
+
+  printf "%-75s : " "  - Role de la base $laBase" 
+  if [ "$(ps -ef | grep "smon_${ORACLE_SID}" | grep -v grep | wc -l)" = "1" ]
   then
     dbRole=$(exec_sql "/ as sysdba" "select database_role from v\$database ;") || die "Erreur a la recuperation du role de la base"
   else
@@ -375,7 +410,37 @@ createDG()
   fi
   echo $dbRole
 
-  if [ "$dbRole" = "PRIMARY" ]
+  if [ "$opePart" = "STANDBY" -a "$dbRole" = "PRIMARY" ]
+  then
+    echo "
+
+  =======================================================================
+  ATTENTION, nous sommes sur la creation de la base stand-by, la base
+  doit etre presente dans le clusterware, mais ne doit pas pouvoir
+  etre lancee en PRIMAIRE. Ici, nous avons une base $stbyDbUniqueName 
+  lancee.
+  
+  Vous devez détruire manuellement tous les fichiers de cette base
+  dans ASM avant de relancer la procedure
+
+  pour ceci lancez les commandes suivantes sous ASM
+  
+  asmcmd rm -rf +DATAC1/$stbyDbUniqueName
+  asmcmd rm -rf +RECOC1/$stbyDbUniqueName
+
+  =======================================================================
+  "
+  printf "%-75s : " "  - Arret de la base $stbyDbUniqueName"
+  srvctl stop database -d $stbyDbUniqueName >$$.tmp 2>&1 \
+    && { echo "Base Stoppee, supprimez les fichiers" ; rm -f $$.tmp ; } \
+    || { echo ERREUR ;  cat $$.tmp ; rm -f $$.tmp ; die "Erreur a l'arret de la base" ; }
+    echo "
+  =======================================================================
+  "
+
+  fi
+
+  if [ "$dbRole" = "PRIMARY" -a "$opePart" = "PRIMARY" ]
   then
     createOnPrimary
     echo "
@@ -387,12 +452,15 @@ suite des operations de déroule depuis la machine stand-by.
 
     Connectez-vous à la machine de secours (noeud 1) et lancez :
 
-  $SCRIPT RunOnStandBY -d $primDbUniqueName -D $stbyDbUniqueName -s $scanLocal
+  $SCRIPT -m RunOnStandBY -d $primDbUniqueName -D $stbyDbUniqueName -s $scanLocal
 
 ========================================================================
 "
+  elif [ "$dbRole" = "NonLancee" -a "$opePart" = "STANDBY" ]
+  then
+    duplicateDBForStandBY
   else
-    dir "Je ne sais pas (encore) faire !"
+    die "Je ne sais pas (encore) faire (opePart=$opePart, dbRole=$dbRole) !"
   fi
   endRun
 }
@@ -593,7 +661,7 @@ SCRIPT=setUpDG.sh
 
 [ "$1" = "" ] && usage
 toShift=0
-while getopts d:D:k:s:L:G:CRTi opt
+while getopts m:d:D:k:s:L:G:CRTi opt
 do
   case $opt in
    # --------- Source Database --------------------------------
@@ -609,6 +677,7 @@ do
    R)   mode=DELETE              ; toShift=$(($toShift + 1)) ;;
    T)   mode=TEST                ; toShift=$(($toShift + 1)) ;;
    i)   aRelancerEnBatch=N       ; toShift=$(($toShift + 1)) ;;
+   m)   ope=$OPTARG              ; toShift=$(($toShift + 2)) ;;
    # --------- Usage ------------------------------------------
    ?|h) usage "Aide demandee";;
   esac
@@ -619,6 +688,14 @@ shift $toShift
 #       Analyse des paramètres et valeurs par défaut
 #
 # -----------------------------------------------------------------------------
+if [ "${ope^^}" = "RUNONSTANDBY" ]
+then
+  opePart="STANDBY"
+  shift
+else
+  opePart="PRIMARY"
+fi
+
 
 #
 #      Base de données source (Db Name)
@@ -677,20 +754,41 @@ fi
 # -----------------------------------------------------------------------------
 
 checkDir $LOG_DIR || die "$LOG_DIR is incorrect"
-[ -f "$HOME/$primDbName.env" ] || die "$primDbName.env non existent"
-. "$HOME/$primDbName.env"
-[ "$(exec_sql "/ as sysdba" "select  name from v\$database;")" != "${primDbName^^}" ] && die "Environnement mal positionne"
+if [ "$opePart" = "PRIMARY" ]
+then
 
-primDbUniqueName=$ORACLE_UNQNAME
+  [ -f "$HOME/$primDbName.env" ] || die "$primDbName.env non existent"
+  . "$HOME/$primDbName.env"
+  [ "$(exec_sql "/ as sysdba" "select  name from v\$database;")" != "${primDbName^^}" ] && die "Environnement mal positionne"
+  primDbUniqueName=$ORACLE_UNQNAME
+  
+  scanStandBy=$scanOppose
+  domaineStandBy=$(echo $scanStandBy | sed -e "s;^[^\.]*\.\([^\:]*\).*$;\1;")  # Domaine du Scan
+  serviceStandBy=$stbyDbUniqueName.$domaineStandBy
+  tnsStandBy="//$scanStandBy/$serviceStandBy"
+  
+  scanLocal=$(srvctl config scan  | grep -i "SCAN name" | cut -f2 -d: | cut -f1 -d, | sed -e "s; ;;g"):1521
+  domainePrimaire=$(echo $scanLocal | sed -e "s;^[^\.]*\.\([^\:]*\).*$;\1;")  # Domaine du Scan
+  servicePrimaire=$primDbUniqueName.$domainePrimaire
+  tnsPrimaire="//$scanLocal/$servicePrimaire"
 
-scanStandBy=$scanOppose
-domaineStandBy=$(echo $scanStandBy | sed -e "s;^[^\.]*\.\([^\:]*\).*$;\1;")  # Domaine du Scan
-serviceStandBy=$stbyDbUniqueName.$domaineStandBy
-tnsStandBy="//$scanStandBy/$serviceStandBy"
-scanLocal=$(srvctl config scan  | grep -i "SCAN name" | cut -f2 -d: | cut -f1 -d, | sed -e "s; ;;g"):1521
-domainePrimaire=$(echo $scanLocal | sed -e "s;^[^\.]*\.\([^\:]*\).*$;\1;")  # Domaine du Scan
-servicePrimaire=$primDbUniqueName.$domainePrimaire
-tnsPrimaire="//$scanLocal/$servicePrimaire"
+else
+
+  [ -f "$HOME/$stbyDbName.env" ] || die "$primDbName.env non existent"
+  . "$HOME/$stbyDbName.env"
+  stbyDbUniqueName=$ORACLE_UNQNAME
+
+  scanLocal=$(srvctl config scan  | grep -i "SCAN name" | cut -f2 -d: | cut -f1 -d, | sed -e "s; ;;g"):1521
+  domaineStandBy=$(echo $scanLocal | sed -e "s;^[^\.]*\.\([^\:]*\).*$;\1;")  # Domaine du Scan
+  serviceStandBy=$stbyDbUniqueName.$domaineStandBy
+  tnsStandBy="//$scanLocal/$serviceStandBy"
+  
+  scanPrimaire=$scanOppose
+  domainePrimaire=$(echo $scanPrimaire | sed -e "s;^[^\.]*\.\([^\:]*\).*$;\1;")  # Domaine du Scan
+  servicePrimaire=$primDbUniqueName.$domainePrimaire
+  tnsPrimaire="//$scanPrimaire/$servicePrimaire"
+
+fi
 
 hostLocal=$(echo $scanLocal | cut -f1 -d:)
 portLocal=$(echo $scanLocal | cut -f2 -d:)
@@ -698,8 +796,7 @@ portLocal=$(echo $scanLocal | cut -f2 -d:)
 hostOppose=$(echo $scanOppose | cut -f1 -d:)
 portOppose=$(echo $scanOppose | cut -f2 -d:)
 
-grep "^${primDbUniqueName}:" /etc/oratab >/dev/null 2>&1 || die "$primDbUniqueName n'est pas dans /etc/oratab"
-
+grep "^${stbyDbUniqueName}:" /etc/oratab >/dev/null 2>&1 || die "$primDbUniqueName n'est pas dans /etc/oratab"
 # -----------------------------------------------------------------------------
 #      Lancement de l'exécution
 # -----------------------------------------------------------------------------
