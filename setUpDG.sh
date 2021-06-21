@@ -1,4 +1,4 @@
-VERSION=0.2
+VERSION=0.3
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 #
 #   Appelé par l'option -T, permet de tester des parties de script
