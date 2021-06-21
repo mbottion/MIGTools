@@ -1,4 +1,4 @@
-VERSION=0.3
+VERSION=0.4
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 #
 #   Appelé par l'option -T, permet de tester des parties de script
@@ -223,67 +223,116 @@ recover  database from service '$primDbUniqueName' section size 64G;
   sleep 30
   finalisationDG
 }
-createOnPrimary()
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+#
+#         Cette procedure prepare la base stand-by pour mise en place de la base
+#  stand-by. Il n'y a aucun arret de la base pendant cette phase
+#
+#    - Verifications de base 
+#    - Recuperation du wallet et du fichier password
+#    - Mise a jour des parametres necessaires
+#    - Generation des alias TNS utiles pour le broker
+#    - Ajout des services DATAGUARD
+#    - Si le SSH est ouvert vers le serveur stand-by on
+#      recopie les fichiers, sinon il faudra les recopier
+#      manuellement dans /tmp en gardant les mêmes noms.
+#
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+preparePrimary()
 {
   tmpOut=/tmp/$$.tmp
   echo "  - Operations sur la base $primDbName cote PRIMARY"
   echo
   echo "    Une fois ces operations realisees, il faudra relancer"
   echo "    ce script sur le cluster de secours avec les options"
-  echo "    fournies"
+  echo "    fournies en fin d'execution"
+  echo
+
+  
+  echo "  - Verifications"
+  echo "    ============="
   echo
 
   printf "%-75s : " "  - Test acces base Primaire (SCAN)"
   tnsping $tnsPrimaire >/dev/null 2>&1 && echo "Ok" || { echo "ERREUR" ; die "TNS de la base primaire inaccessible" ; }
+
   printf "%-75s : " "  - Test acces base Stand-By (SCAN)"
   tnsping $tnsStandBy >/dev/null 2>&1 && echo "Ok" || { echo "ERREUR" ; die "TNS de la base primaire inaccessible" ; }
 
   printf "%-75s : " "  - Recuperation GRID_HOME"
   gridHome=$(grep "^+ASM1:" /etc/oratab | cut -f2 -d":")
   [ "$gridHome" = "" ] &&  { echo "Impossible" ; die "Impossible de determiner GRID_HOME" ; } || echo "OK ($gridHome)"
-  
-  . oraenv <<< +ASM1 >/dev/null
-  asmPath=+DATAC1/$primDbUniqueName/DG
-  printf "%-75s : " "  - Test de $asmPath"
-  v=$(exec_sql "/ as sysdba" "
-SELECT 'OK'
-FROM ( SELECT
-  concat('+' || gname, sys_connect_by_path(aname, '/')) full_alias_path
-  FROM ( SELECT
-  g.name            gname,
-  a.parent_index    pindex,
-  a.name            aname,
-  a.reference_index rindex
-FROM
-  v\$asm_alias      a,
-  v\$asm_diskgroup  g
-WHERE
-  a.group_number = g.group_number)
-START WITH ( mod(pindex, power(2, 24)) ) = 0
-CONNECT BY PRIOR rindex = pindex)
-WHERE
-    upper(full_alias_path) = upper('$asmPath');
-")
-
-  [ "$v" = "OK" ]  && echo OK || { echo ERR ; die "Le repertoire $asmPath n'existe pas
-veuillez lancer la commande  suivante depuis l'utilisateur GRID
-
-  asmcmd mkdir $asmPath
-
-" ; }
-
- . $HOME/$primDbName.env
 
   checkDBParam "Base en force Logging"     "select force_logging from v\$database;"                           "YES"
   checkDBParam "Base en Flashback"         "select flashback_on  from v\$database;"                           "YES"
-#  checkDBParam "log_archive_config vide"   "select value from v\$parameter where name='log_archive_config';"  ""
+  
+  echo
+  echo "  - Recopie des fichiers utiles a la creation de la base stand-by"
+  echo "    ============================================================="
+  echo
+  printf "%-75s : " "  - Emplacement du Wallet TDE"
+  tdeWallet=$(exec_sql "/ as sysdba" "select wrl_parameter from v\$encryption_wallet;") 
+  [ -d "$tdeWallet" ] && { echo $tdeWallet ; } \
+                      || { echo "Erreur" ; echo $tdeWallet ; die "Impossible de recuperer le repertoire du wallet" ; }
 
+  printf "%-75s : " "  - Copie des fichers du Wallet"
+  { cp $tdeWallet/ewallet.p12 /tmp/${primDbUniqueName}_ewallet.p12 \
+    && cp $tdeWallet/cwallet.sso /tmp/${primDbUniqueName}_cwallet.sso ; } \
+       && echo "OK"  \
+       || die "Impossible de copier les fichiers du wallet"
+
+  #
+  #   On doit avoir l'environnement ASM pour utiliser ASMCMD
+  #
+  echo
+  printf "%-75s : " "  - Password File"
+  passwordFile=$(srvctl config database -d $ORACLE_UNQNAME | grep "Password file" | sed -e "s;^.*: *;;")
+
+  . oraenv <<< $ASM_INSTANCE >/dev/null
+  $gridHome/bin/asmcmd --privilege sysdba ls $passwordFile >/dev/null 2<&1 \
+    && { echo $passwordFile ; } \
+    || { echo "Erreur"  ; echo $passwrdFile ; die "Impossible de trouver le fichier Password" ; }
+
+  printf "%-75s : " "  - Copie du fichier password"
+
+  #
+  #     Ce bricolage immonde permet de contourner le probleme 
+  # de droits d'accès au fichier qui appartient à grid au départ
+  #
+  rm -rf /tmp/recup$$
+  mkdir /tmp/recup$$
+  chmod 777 /tmp/recup$$
+  $gridHome/bin/asmcmd --privilege sysdba cp $passwordFile /tmp/recup$$/${primDbUniqueName}_passwd.ora >$$.tmp 2<&1 \
+    && { echo "Ok" ; cp /tmp/recup$$/${primDbUniqueName}_passwd.ora /tmp/${primDbUniqueName}_passwd.ora ; rm -f $$.tmp ; } \
+    || { echo "Erreur"  ; cat $$.tmp ; rm -f $$.tmp ; die "Impossible de recuperer le fichier Password" ; }
+  rm -rf /tmp/recup$$
+
+  asmPath=+DATAC1/$primDbUniqueName/DG
+  printf "%-75s : " "  - Test de $asmPath"
+  $gridHome/bin/asmcmd --privilege sysdba ls -d $asmPath >/dev/null 2>&1 \
+    && { v="OK" ; echo "OK" ; } \
+    || { v="KO" ; echo "Non Existant" ; }
+
+  if [ "$v" != "OK" ]
+  then
+    printf "%-75s : " "  - Creation de $asmPath"
+    $gridHome/bin/asmcmd --privilege sysdba mkdir $asmPath >$$.tmp 2>&1 \
+      && { echo OK ; rm -f $$.tmp ; } \
+      || { echo ERREUR ; cat $$.tmp ; rm -f $$.tmp ; die "Impossible de creer $asmPath" ; }
+  fi
+ . $HOME/$primDbName.env
+
+#
+  echo
+  echo "  - Changement des parametres de la base"
+  echo "    ===================================="
+  echo
   changeParam "LOG_ARCHIVE_DEST_1"                 "'LOCATION=USE_DB_RECOVERY_FILE_DEST VALID_FOR=(ALL_LOGFILES,ALL_ROLES) MAX_FAILURE=1 REOPEN=5 DB_UNIQUE_NAME=$primDbUniqueName ALTERNATE=LOG_ARCHIVE_DEST_10'"
   changeParam "LOG_ARCHIVE_DEST_10"                "'LOCATION=+DATAC1 VALID_FOR=(ALL_LOGFILES,ALL_ROLES) DB_UNIQUE_NAME=$primDbUniqueName ALTERNATE=LOG_ARCHIVE_DEST_1'"
   changeParam "LOG_ARCHIVE_DEST_STATE_10"          "ALTERNATE"
   changeParam "LOG_ARCHIVE_CONFIG"                 "'DG_CONFIG=($primDbUniqueName,$stbyDbUniqueName)'"
   changeParam "log_archive_format"                 "'%t_%s_%r.dbf'"
-  changeParam "DB_WRITER_PROCESSES"                "4"
+  #changeParam "DB_WRITER_PROCESSES"                "4"
   changeParam "log_archive_max_processes"          "8"
   changeParam "STANDBY_FILE_MANAGEMENT"            "AUTO"
   changeParam "remote_login_passwordfile"          "'EXCLUSIVE'"
@@ -291,32 +340,32 @@ veuillez lancer la commande  suivante depuis l'utilisateur GRID
   changeParam "db_block_checksum"                  "'TYPICAL'"
   changeParam "db_lost_write_protect"              "'TYPICAL'"
   changeParam "fast_start_mttr_target"             "300"
-  changeParam "log_buffer"                         "268435456"
+  #changeParam "log_buffer"                         "268435456"
   changeParam "\"_redo_transport_min_kbytes_sec\"" "100"
   
-  printf "%-75s : " "  - Taille des logs"
+  printf "%-75s : " "    - Taille des logs"
   tailleLogs=$(exec_sql "/ as sysdba" "select to_char(max(bytes)) from v\$log;")  \
     && echo $tailleLogs \
     || { echo "Erreur" ; echo "$tailleLogs" ; die "Erreur de recuperation de la taille des logs" ; }
   
-  printf "%-75s : " "  - Dernier logs"
+  printf "%-75s : " "    - Dernier logs"
   lastLog=$(exec_sql "/ as sysdba" "select to_char(max(group#)) from v\$log;")  \
     && echo $lastLog \
     || { echo "Erreur" ; echo "$lastLog" ; die "Erreur de recuperation du numero du dernier log" ; }
   
-  printf "%-75s : " "  - Nombre de Logs"
+  printf "%-75s : " "    - Nombre de Logs"
   nombreLogs=$(exec_sql "/ as sysdba" "select to_char(count(*)) from v\$log;")  \
     && echo $nombreLogs \
     || { echo "Erreur" ; echo "$nombreLogs" ; die "Erreur de recuperation du nombre de logs" ; }
   
-  printf "%-75s : " "  - Nombre de Standby Logs"
+  printf "%-75s : " "    - Nombre de Standby Logs"
   nombreStandbyLogs=$(exec_sql "/ as sysdba" "select to_char(count(*)) from v\$standby_log;")  \
     && echo $nombreStandbyLogs \
     || { echo "Erreur" ; echo "$nombreStandbyLogs" ; die "Erreur de recuperation du nombre de Standby logs" ; }
   
   if [ "$nombreStandbyLogs" = "0" ]
   then
-    echo "  - Creation des STANDBY LOGS"
+    echo "    - Creation des STANDBY LOGS"
     exec_sql "/ as sysdba" "
 select 'ALTER DATABASE ADD STANDBY LOGFILE THREAD ' || 
        thread# || 
@@ -325,30 +374,59 @@ select 'ALTER DATABASE ADD STANDBY LOGFILE THREAD ' ||
 from v\$log ;
     " | while read line
     do
-      exec_sql "/ as sysdba" "$line;" "    --> $line" || die "Erreur de creation de standby log"
+      exec_sql "/ as sysdba" "$line;" "        --> $line" || die "Erreur de creation de standby log"
     done
   elif [ "$nombreStandbyLogs" = "$nombreLogs" ]
   then
-    echo "  - Standby logs correct "
+    echo "    - Standby logs correct "
   else
     die "Le nombre de standby logs n'est pas correct, corriger avant de relancer"
   fi
 
+  echo
+  echo "  - Generation des Alias TNS necessaires"
+  echo "    ===================================="
+  echo
   tnsAliasesForDG $primDbUniqueName $hostPrimaire $portPrimaire $servicePrimaire $domainePrimaire \
                   $stbyDbUniqueName $hostStandBy  $portStandBy  $serviceStandBy  $domaineStandBy
 
-  echo "  - Recopie TNSNAMES sur autre noeud"
+  echo
+  echo "    - Recopie TNSNAMES sur autre noeud"
   otherNode=$(srvctl status database -d $ORACLE_UNQNAME | grep -v $(hostname -s) | sed -e "s;^.*on node ;;")
   printf "%-75s : " "    - Copie sur $otherNode"
   scp -o StrictHostKeyChecking=no $TNS_ADMIN/tnsnames.ora ${otherNode}:$TNS_ADMIN \
     && echo "Ok" \
     || die "Impossible de copie le TNSNAMES sur $otherNode"
   
+  echo
   echo "  - Ajout des services DATAGUARD"
+  echo "    ============================"
+  echo
   addDGService ${primDbName}_dg    PRIMARY          Y
   addDGService ${primDbName}_dg_ro PHYSICAL_STANDBY N
 
+
+  echo
+  echo "  - Tentative de recopie des fichiers sur $dbServerOppose"
+  echo "    ====================================================="
+  echo      
+  echo "    Si cette phase echoue, il faudra recopier ces fichiers manuellement"
+  echo      
+  for f in /tmp/${primDbUniqueName}_*
+  do
+    printf "%-75s : " "    - Copie de $(basename $f) sur $dbServerOppose"
+    scp -q $f ${dbServerOppose}:/tmp >/dev/null 2>&1                         \
+      && { echo "OK" ; rm -f $f ; }                                          \
+      || echo "A copier manuellement dans /tmp@$dbServerOppose"
+  done 
+
 }
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+#
+#     Ajout des services _dg et _dg_ro sur la base de données (a faire sur
+#  les deux bases de donnees
+#
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 addDGService()
 {
   service=$1
@@ -382,25 +460,35 @@ addDGService()
        || { echo "ERREUR" ; cat $$.tmp ; rm -f $$.tmp ; die "Impossible de lancer $service" ; }
   fi
 }
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+#     Cree l'ensemble des alias necessaires au fonctionnement du DG
+#  on met à jour le tnsnames.ora associé à la base de données. 
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 tnsAliasesForDG()
 {
   tnsFile=$TNS_ADMIN/tnsnames.ora
   tnsBackup=$tnsFile.$(date +%Y%m%d)
-  printf "%-75s : " "  - Existence de $(basename $tnsFile)"
+  printf "%-75s : " "    - Existence de $(basename $tnsFile)"
   [ -f $tnsFile ] && echo "Ok" || { echo "ERREUR" ; die "$tnsFile non trouve" ; }
-  printf "%-75s : " "  - Existence de $(basename $tnsBackup)"
+  printf "%-75s : " "    - Existence de $(basename $tnsBackup)"
   if [ -f $tnsBackup ]
   then
     echo "OK"
   else
     echo "Non Trouve"
-    printf "%-75s : " "    - backup dans $(basename $tnsBackup)"
+    printf "%-75s : " "      - backup dans $(basename $tnsBackup)"
     cp -p $tnsFile $tnsBackup && echo "OK" || die "Impossible de sauvegarder $tnsFile"
   fi
-  
-dbTmp=$(echo $1 | cut -f1 -d"_")
-domaine1=$5
-domaine2=$10
+
+  echo  
+  dbTmp=$(echo $1 | cut -f1 -d"_")
+  domaine1=$5
+  domaine2=$10
+  echo
+  echo "      ============================="
+  echo "    - Aliases pour les services"
+  echo "      ============================="
+  echo
   for suffix in dg dg_ro
   do
     addToTns $tnsFile "${dbTmp}_$suffix" "\
@@ -423,10 +511,16 @@ domaine2=$10
      )
   ) "
   done
+  
+  echo 
 
   for db in $1 $6
   do
-    echo "  - Aliases pour $db"
+    echo
+    echo "      ============================="
+    echo "    - Aliases pour $db"
+    echo "      ============================="
+    echo
     dbUniqueName=$1
     dbName=$(echo $dbUniqueName | cut -f1 -d"_")
     host=$2
@@ -474,16 +568,19 @@ domaine2=$10
     done
   done
 }
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+#      Ajoute ou remplace un alias dans le tnsnames.ora
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 addToTns()
 {
   local TNS_FILE=$1
   local alias=$2
   local tns=$3
-  printf "%-75s : " "      - Ajout de $alias"
+  printf "%-75s : " "          - Ajout de $alias"
   if grep "^[ \t]*$alias[ \t]*=" $TNS_FILE >/dev/null
   then
     echo "Existant a remplacer"
-    printf "%-75s : " "        - Suppression Alias"
+    printf "%-75s : " "            - Suppression Alias"
     cp -p $TNS_FILE $TNS_FILE.sv
     cat $TNS_FILE.sv | awk '
     BEGIN { toKeep="Y" }    
@@ -526,45 +623,53 @@ addToTns()
     echo "Nouvel Alias"
   fi
   cp -p $TNS_FILE $TNS_FILE.sv
-  printf "%-75s : " "        - Ajout alias"
+  printf "%-75s : " "            - Ajout alias"
   echo "$alias = $tns" >> $TNS_FILE 2>$$.tmp \
     && { echo "OK" ; rm -f $$.tmp $TNS_FILE.sv ; } \
     || { echo "ERREUR" ; cat $$.tmp ; rm -f $$.tmp ; cp -p $TNS_FILE.sv $TNS_FILE ; die "Erreur de mise a jour TNS (ajout $alias)" ; }
+  echo
 }
 
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+#    Change un parametre si la valeur voulue n'est pas positionnée
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 changeParam()
 {
   local param=$1
   local new_val=$2
   old_val=$(exec_sql "/ as sysdba" "select value from v\$parameter where name=lower('$param');")
-  echo    "  - changement de $param --->"
-  echo    "    - Valeur courante : $old_val"
-  echo    "    - Nouvelle valeur : $new_val"
+  echo    "    - changement de $param --->"
+  echo    "      - Valeur courante : $old_val"
+  echo    "      - Nouvelle valeur : $new_val"
   o=$(echo $old_val | sed -e "s;^'*;;g" -e "s;'*$;;g")
   n=$(echo $new_val | sed -e "s;^'*;;g" -e "s;'*$;;g")
   if [ "$o" != "$n" ]
   then
-    exec_sql "/ as sysdba" "alter system set $param=$new_val scope=both sid='*';" "    Changement de valeur"
+    exec_sql "/ as sysdba" "alter system set $param=$new_val scope=both sid='*';" "        - Changement de valeur"
   else
-    echo "    - Valeur correcte, inchangé"
+    echo "        - Valeur correcte, inchangé"
   fi
+  echo
 }
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+#   Verifie que le resultat d'un ordre SQL correspond a ce qui est attendu
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 checkDBParam()
 {
   local lib=$1
   local sql=$2
   local res=$3
-  printf "%-75s : " "  - $lib"
+  printf "%-75s : " "    - $lib"
   v=$(exec_sql "/ as sysdba" "$sql")
   [ "$v" = "$res" ] && echo "OK" || { echo "ERR" ; die "Erreur de verification des conditions initiales" ; }
 }
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-#
-# 
+#       Procedure principale qui va lancer la creation de la base
+# stand-by ou la preparation de la primaire.
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 createDG()
 {
-  startRun "Creation d'une association DATAGUARD"
+  startRun "Creation d'une base stand-by"
   echo
   echo "==============================================================="
   echo
@@ -572,14 +677,15 @@ createDG()
   echo "    --> $hostLocal ($portLocal)"
   echo "  - SCAN oppose      : $scanOppose"
   echo "    --> $hostOppose ($portOppose)"
+  echo "  - Db server oppose : $dbServerOppose"
   echo "  - Base PRIMAIRE    : $primDbName ($primDbUniqueName)"
-  echo "    --> Host   : $hostPrimaire - $portPrimaire"
-  echo "    --> Scan   : $scanPrimaire"
-  echo "    --> Tns    : $tnsPrimaire"
+  echo "    --> Host         : $hostPrimaire - $portPrimaire"
+  echo "    --> Scan         : $scanPrimaire"
+  echo "    --> Tns          : $tnsPrimaire"
   echo "  - Base STANDBY     : $stbyDbName ($stbyDbUniqueName)"
-  echo "    --> Host   : $hostStandBy - $portStandBy"
-  echo "    --> Scan   : $scanStandBy"
-  echo "    --> Tns    : $tnsStandBy"
+  echo "    --> Host         : $hostStandBy - $portStandBy"
+  echo "    --> Scan         : $scanStandBy"
+  echo "    --> Tns          : $tnsStandBy"
   echo "  - TNS_ADMIN        : $TNS_ADMIN"
   echo "  - Execution sur    : $opePart"
   echo
@@ -740,13 +846,24 @@ fi
 
   if [ "$dbRole" = "PRIMARY" -a "$opePart" = "PRIMARY" ]
   then
-    createOnPrimary
-    tdeWallet=$(exec_sql "/ as sysdba" "select wrl_parameter from v\$encryption_wallet;") || die "Impossible de recuperer le repertoire du wallet"
-    printf "%-75s : " "  - Copie des fichers du Wallet"
-    { cp -p $tdeWallet/ewallet.p12 /tmp/${primDbUniqueName}_ewallet.p12 \
- && cp -p $tdeWallet/cwallet.sso /tmp/${primDbUniqueName}_cwallet.sso ; } \
- && echo "OK" || die "Impossible de copier les fichiers du wallet"
- passwordFile=$(srvctl config database -d $ORACLE_UNQNAME | grep "Password file" | sed -e "s;^.*: *;;")
+    preparePrimary
+    
+    if [    -f /tmp/${primDbUniqueName}_ewallet.p12 \
+         -o -f /tmp/${primDbUniqueName}_cwallet.sso \
+         -o -f /tmp/${primDbUniqueName}_passwd.ora ]
+    then
+      scpMessage="
+    - copier manuellement les fichiers ci dessous sur $dbServerOppose
+          /tmp/${primDbUniqueName}_ewallet.p12
+          /tmp/${primDbUniqueName}_cwallet.sso
+          /tmp/${primDbUniqueName}_passwd.ora
+      dans le repertoire /tmp, puis effacez-les du serveur courant"
+    else
+     scpMessage="
+      (Les fichiers necessaires a la mise en place de
+       la base stand-by ont ete copies sur $dbServerOppose,
+       vous n'avez pas d'operation manuelle a realiser)"
+    fi  
     echo "
 
 ========================================================================
@@ -756,24 +873,7 @@ suite des operations de déroule depuis la machine stand-by.
 
     Pour continuer :
 
-    1) Recuperez le fichier password en lançant (sous \"grid\")
-
-       asmcmd cp $passwordFile /tmp/${primDbUniqueName}_passwd.ora
-
-    2) Transferez les trois fichiers ci-dessous sur le
-       serveur stand-by (dans /tmp)
-
-       /tmp/${primDbUniqueName}_ewallet.p12
-       /tmp/${primDbUniqueName}_cwallet.sso
-       /tmp/${primDbUniqueName}_passwd.ora
-
-    3) Effacez ces trois fichiers
-
-       rm -f /tmp/${primDbUniqueName}_ewallet.p12
-       rm -f /tmp/${primDbUniqueName}_cwallet.sso
-       rm -f /tmp/${primDbUniqueName}_passwd.ora
-
-    4) Connectez-vous à la machine de secours (noeud 1) et lancez :
+    - Connectez-vous à la machine de secours (noeud 1) et lancez :
  
   $SCRIPT -m RunOnStandBY -d $primDbUniqueName -D $stbyDbUniqueName -s $scanLocal
 
@@ -982,6 +1082,9 @@ set -o pipefail
 
 SCRIPT=setUpDG.sh
 
+[ "$(id -un)" != "oracle" ] && die "Merci de lancer ce script depuis l'utilisateur \"oracle\""
+[ "$(hostname -s | sed -e "s;.*\([0-9]\)$;\1;")" != "1" ] && die "Lancer ce script depuis le premier noeud du cluster"
+
 [ "$1" = "" ] && usage
 toShift=0
 while getopts m:d:D:k:s:L:G:CRTi opt
@@ -1060,6 +1163,7 @@ aRelancerEnBatch=${aRelancerEnBatch:-Y}          # Par défaut, le script de rea
 DAT=$(date +%Y%m%d_%H%M)                     # DATE (for filenames)
 BASEDIR=$HOME/dataguard                      # Base dir for logs & files
 LOG_DIR=$BASEDIR/$primDbName                  # Log DIR
+ASM_INSTANCE=$(ps -ef | grep smon_+ASM | grep -v grep |sed -e "s;^.*+ASM;+ASM;")
 
 if [ "$LOG_FILE" = "" ]
 then
@@ -1132,10 +1236,12 @@ else
   hostStandBy=$hostLocal
   portStandBy=$portLocal
 
+
   grep "^${stbyDbUniqueName}:" /etc/oratab >/dev/null 2>&1 || die "$stbyDbUniqueName n'est pas dans /etc/oratab"
 
 fi
 
+dbServerOppose=$(echo $hostOppose | sed -e "s;^\(.*\)\(-scan\)\(.*\)$;\11\3;")
 
 # -----------------------------------------------------------------------------
 #      Lancement de l'exécution
