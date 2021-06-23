@@ -1,4 +1,4 @@
-VERSION=0.6
+VERSION=1.0
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 #
 #   Appelé par l'option -T, permet de tester des parties de script
@@ -1086,7 +1086,11 @@ suite des operations de déroule depuis la machine stand-by.
     Pour continuer :
 
     - Connectez-vous à la machine de secours (noeud 1) et lancez :
- 
+
+    $0 -m RunOnStandBY -d $primDbUniqueName -D $stbyDbUniqueName -s $scanPrimaire -R
+    
+    puis :
+
     $0 -m RunOnStandBY -d $primDbUniqueName -D $stbyDbUniqueName -s $scanPrimaire
 
     Rajouter '-i' pour que le déroulement se fasse en interactif.
@@ -1434,12 +1438,8 @@ Usage :
          [-s scan]
          [-C|-R|-V] [-h|-?]
 
-         primDbName   : Base PRIMAIRE (db Name seulement)
-         stbyDbName   : Base StandBy (db Unique Name seulement - elle doit exister)
-         keyStorePass : MOt de passe TDE Cible, necessaire seulement
-                        si on ne peut pas le recuperer dans le Wallet
-         diskGroup    : DB_CREATE_FILE_Dest de 
-                        la cible                 : Defaut inchange
+         primDbName   : Base PRIMAIRE (db Unique Name)
+         stbyDbName   : Base StandBy (db Unique Name - elle doit exister)
          scan         : Adresse Scan (host:port) de la contrepartie: Defaut HPR
          -C           : Copie et migration d'une base (le script se relance
                         en nohup apres que les premieres verifications sont faites
@@ -1467,7 +1467,7 @@ SCRIPT=setUpDG.sh
 
 [ "$1" = "" ] && usage
 toShift=0
-while getopts m:d:D:s:CRTVi opt
+while getopts m:d:D:s:hCRTVi opt
 do
   case $opt in
    # --------- Source Database --------------------------------
