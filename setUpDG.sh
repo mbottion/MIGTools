@@ -1,4 +1,4 @@
-VERSION=0.5
+VERSION=0.6
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 #
 #   Appelé par l'option -T, permet de tester des parties de script
@@ -10,6 +10,67 @@ testUnit()
 
 
   endStep
+}
+verificationDG()
+{
+  echo
+  echo "  - Tests de connexion et etat DG"
+  echo "    ============================="
+  echo
+
+  printf "%-75s : " "      - Connexion à ${primDbName}_dg    dbUniqueName (nominal) = $primDbUniqueName"
+  res=$(exec_sql "sys/${dbPassword}@ ${primDbName}_dg as sysdba" "select db_unique_name from v\$database ;")
+  if [ "$res" = "$primDbUniqueName" ] 
+  then
+    echo "OK --> $res" 
+  elif [ "$res" = "$stbyDbUniqueName" ]
+  then
+    echo "Retourne --> $res"
+  else
+    echo "Erreur"
+    echo "$res"
+    die "Mauvaise connexion à ${primDbName}_dg"
+  fi
+
+  printf "%-75s : " "      - Connexion à ${primDbName}_dg_ro dbUniqueName (nominal) = $stbyDbUniqueName"
+  res=$(exec_sql "sys/${dbPassword}@ ${primDbName}_dg_ro as sysdba" "select db_unique_name from v\$database ;")
+  if [ "$res" = "$stbyDbUniqueName" ]
+  then
+    echo "OK --> $res" 
+  elif [ "$res" = "$primDbUniqueName" ]
+  then
+    echo "Retourne --> $res" 
+  else
+    echo "Erreur"
+    echo "$res"
+    die "Mauvaise connexion à ${primDbName}_dg_ro"
+  fi
+
+  echo ===============================================================
+  echo Configuration
+  echo ===============================================================
+  dgmgrl -silent / "show configuration"
+
+  echo ===============================================================
+  echo Show database $primDbUniqueName
+  echo ===============================================================
+  dgmgrl -silent / "show database verbose $primDbUniqueName"
+
+  echo ===============================================================
+  echo Show database $stbyDbUniqueName
+  echo ===============================================================
+  dgmgrl -silent / "show database verbose $stbyDbUniqueName"
+
+  echo ===============================================================
+  echo Validate database $primDbUniqueName
+  echo ===============================================================
+  dgmgrl -silent / "validate database verbose $primDbUniqueName"
+
+  echo ===============================================================
+  echo Validate database $stbyDbUniqueName
+  echo ===============================================================
+  dgmgrl -silent / "validate database verbose $stbyDbUniqueName"
+  echo ===============================================================
 }
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 #
@@ -44,7 +105,7 @@ begin
   end loop; 
 end;
 /
-" "  - Nettoyage des REDO-LOGS"
+" "  - Nettoyage des REDO-LOGS (Erreur a la deuxieme execution)"
 
   echo
   exec_sql -verbose "/ as sysdba" "
@@ -58,7 +119,7 @@ begin
   end loop; 
 end;
 /
-" "  - Nettoyage des STANDBY REDO-LOGS"
+" "  - Nettoyage des STANDBY REDO-LOGS (Erreur a la deuxieme execution)"
 
   echo
   echo "  - Dataguard Broker (Stand By : $stbyDbUniqueName)"
@@ -158,17 +219,17 @@ end;
   if [ "$(ps -ef | grep smon_$ORACLE_SID | grep -v grep)" = "" ]
   then
     exec_srvctl "start database -d $ORACLE_UNQNAME" \
-                "      - Lancement de la base de donnes" \
+                "    - Lancement de la base de donnes" \
                 "Ok" "Erreur" "Impossible de lancer la base"
   fi
-  printf "%-75s : " "      - Role de la base $stbyDbUniqueName"
+  printf "%-75s : " "    - Role de la base $stbyDbUniqueName"
   dbRole=$(exec_sql "/ as sysdba" "select database_role from v\$database; ") \
     && { echo "$dbRole" ; } \
     || { echo Erreur ; echo $dbRole ; die "Impossible de selectionne le role de la base" ; }
 
   [ "$dbRole" = "PRIMARY" ] && die "Le role de la base est incorrect"
 
-  printf "%-75s : " "      - Etat de la base $stbyDbUniqueName"
+  printf "%-75s : " "    - Etat de la base $stbyDbUniqueName"
   dbState=$(exec_sql "/ as sysdba" "select open_mode from v\$database; ") \
     && { echo "$dbState" ; } \
   || { echo Erreur ; echo $dbState ; die "Impossible de selectionne l'etat de la base" ; }
@@ -177,14 +238,14 @@ end;
   then
 
     exec_srvctl "stop database -d $ORACLE_UNQNAME" \
-                "      - Arret de la base de donnes" \
+                "    - Arret de la base de donnes" \
                 "Ok" "Erreur" "Impossible de stopper la base" 
 
     exec_srvctl "start database -d $ORACLE_UNQNAME" \
-                "      - Lancement de la base de donnes" \
+                "    - Lancement de la base de donnes" \
                 "Ok" "Erreur" "Impossible de lancer la base" 
 
-    printf "%-75s : " "      - Etat de la base $stbyDbUniqueName"
+    printf "%-75s : " "    - Etat de la base $stbyDbUniqueName"
     dbState=$(exec_sql "/ as sysdba" "select open_mode from v\$database; ") \
       && { echo "$dbState" ; } \
       || { echo Erreur ; echo $dbState ; die "Impossible de selectionne l'etat de la base" ; }
@@ -201,44 +262,8 @@ end;
   addDGService ${primDbName}_dg    PRIMARY          N
   addDGService ${primDbName}_dg_ro PHYSICAL_STANDBY Y
 
-  echo
-  echo "  - Tests de connexion et etat DG"
-  echo "    ============================="
-  echo
+  verificationDG
 
-  printf "%-75s : " "      - Connexion à ${primDbName}_dg    dbUniqueName=$primDbUniqueName"
-  res=$(exec_sql "sys/${dbPassword}@ ${primDbName}_dg as sysdba" "select db_unique_name from v\$database ;")
-  [ "$res" = "$primDbUniqueName" ] \
-    && echo "OK --> $res" \
-    || { echo "Erreur" ; echo "$res" ; die "Mauvaise connexion à ${primDbName}_dg" ; }
-
-  printf "%-75s : " "      - Connexion à ${primDbName}_dg_ro dbUniqueName=$stbyDbUniqueName"
-  res=$(exec_sql "sys/${dbPassword}@ ${primDbName}_dg_ro as sysdba" "select db_unique_name from v\$database ;")
-  [ "$res" = "$stbyDbUniqueName" ] \
-    && echo "OK --> $res" \
-    || { echo "Erreur" ; echo "$res" ; die "Mauvaise connexion à ${primDbName}_dg_ro" ; }
-
-  echo ===============================================================
-  echo Configuration
-  echo ===============================================================
-  dgmgrl -silent / "show configuration"
-  echo ===============================================================
-  echo Show database $primDbUniqueName
-  echo ===============================================================
-  dgmgrl -silent / "show database $primDbUniqueName"
-  echo ===============================================================
-  echo Show database $stbyDbUniqueName
-  echo ===============================================================
-  dgmgrl -silent / "show database $stbyDbUniqueName"
-  echo ===============================================================
-  echo Validate database $primDbUniqueName
-  echo ===============================================================
-  dgmgrl -silent / "validate database $primDbUniqueName"
-  echo ===============================================================
-  echo Validate database $stbyDbUniqueName
-  echo ===============================================================
-  dgmgrl -silent / "validate database $stbyDbUniqueName"
-  echo ===============================================================
 
   endStep
 }
@@ -483,14 +508,16 @@ preparePrimary()
     exec_sql "/ as sysdba" "
 select 'ALTER DATABASE ADD STANDBY LOGFILE THREAD ' || 
        thread# || 
-       ' GROUP ' || to_char($lastLog + rownum)  || 
+       ' GROUP ' || to_char($lastLog + rownum + 1)  || 
        ' (''+DATAC1'') SIZE $tailleLogs' 
-from v\$log ;
+from (          select thread# ,group#      from v\$log
+      union all select thread# ,max(group#) from v\$log group by thread#
+     ) ;
     " | while read line
     do
-      exec_sql "/ as sysdba" "$line;" "        --> $line" || die "Erreur de creation de standby log"
-    done
-  elif [ "$nombreStandbyLogs" = "$nombreLogs" ]
+      exec_sql "/ as sysdba" "$line;" "        --> $line"  || break
+    done || die "Erreur de creation de standby log"
+  elif [ $nombreStandbyLogs -eq $(($nombreLogs+2)) -a $nombreStandbyLogs -ne 0 ]
   then
     echo "    - Standby logs correct "
   else
@@ -559,6 +586,14 @@ addDGService()
                 "Ok" "Erreur" "Impossible de supprimer $service"
   else
     echo "Non Existant"
+  fi
+  tmp=$(exec_sql "/ as sysdba" "select open_mode from v\$database;")
+  if [ "$tmp" = "READ WRITE" ]
+  then
+    exec_sql "/ as sysdba" "
+      delete from cdb_service\$ where name = '$service' ;
+      commit ;
+      " "      - Suppression du service de cdb_service\$" || die "Impossible de nettoyer cdb_service\$"
   fi
     exec_srvctl "add service -d $ORACLE_UNQNAME -s $service -r ${primDbName}1,${primDbName}2 -l $role -q TRUE -e SESSION -m BASIC -w 10 -z 150" \
                 "      - Ajout de $service" \
@@ -833,15 +868,20 @@ cleanASMBeforeCopy()
 
     echo
     saveSpfile=$LOG_DIR/init_${stbyDbUniqueName}_${DAT}.ora
-    exec_sql "/ as sysdba" "create pfile='$saveSpfile' from spfile;" "    - Sauvegarde du SPFILE" ; status=$?
-    echo "      --> INIT.ORA   : $saveSpfile"
+    exec_sql "/ as sysdba" "
+whenever sqlerror continue
+startup nomount;
+whenever sqlerror exit failure
+create pfile='$saveSpfile' from spfile;" "    - Sauvegarde du SPFILE" ; status=$?
     if [ $status -ne 0 ]
     then
       saveSpFile=""
-      echo "      --> Pas de fichier passwd dans ASM"
+      echo "      --> Pas de fichier SPFILE dans ASM"
       echo "          Recherche d'une precedente sauvegarde"
-      saveSpfile=$(ls -1t $LOG_DIR/*.ora | tail -1)
+      saveSpfile=$(ls -1t $LOG_DIR/init*.ora | tail -1)
       echo "        --> INIT.ORA (Backup) : $saveSpfile"
+    else
+      echo "      --> INIT.ORA   : $saveSpfile"
     fi
     [ ! -f $saveSpFile ] && die "Impossible d'obtenir une sauvegarde du SPFILE"
     
@@ -861,7 +901,7 @@ cleanASMBeforeCopy()
     if [ ! -f /tmp/${primDbUniqueName}_passwd.ora ]
     then
       exec_asmcmd "cp $pwfileLoc /tmp/${primDbUniqueName}_passwd.ora" \
-                  "    - Sauvegarde du fichier password" "Ok" "Erreur"
+                  "    - Sauvegarde du fichier password" "Ok" "Erreur" "Impossible de sauvegarder le fichier passwd"
     fi
 
     echo
@@ -871,6 +911,8 @@ cleanASMBeforeCopy()
     [ "$(ps -ef | grep smon_$ORACLE_SID | grep -v grep)" = "" ]  \
       && echo "Stoppee" \
       || die "Impossible de stopper la base $laBase"
+
+    sleep 10
 
     . oraenv <<< $ASM_INSTANCE >/dev/null || die "Impossible de passer sous ASM"
 
@@ -894,8 +936,14 @@ cleanASMBeforeCopy()
 
     . $stbyEnvFile || die "Impossible de positionner l'environnement de la base $stbyDbUniqueName"
 
-    exec_sql "/ as sysdba" "create spfile='$spfileLoc' from pfile='$saveSpfile' ;" "    - Creation du SPFILE"
-   
+    exec_sql "/ as sysdba" "
+whenever sqlerror continue
+startup nomount pfile='$saveSpfile';
+whenever sqlerror exit failure
+create spfile='$spfileLoc' from pfile='$saveSpfile' ;
+shutdown abort; " \
+             "    - Creation du SPFILE" || die "Impossible de recreer le SPFILE"
+
     if [ -f /tmp/${primDbUniqueName}_ewallet.p12 ]
     then
       echo
@@ -923,13 +971,8 @@ deleteStandBy()
   cleanASMBeforeCopy $stbyDbUniqueName DELETEONLY
   endRun
 }
-# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-#       Procedure principale qui va lancer la creation de la base
-# stand-by ou la preparation de la primaire.
-# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-createDG()
+showVars()
 {
-  startRun "Creation d'une base stand-by"
   echo
   echo "==============================================================="
   echo
@@ -951,37 +994,21 @@ createDG()
   echo
   echo "==============================================================="
   echo
+}
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+#       Procedure principale qui va lancer la creation de la base
+# stand-by ou la preparation de la primaire.
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+createDG()
+{
+  startRun "Creation d'une base stand-by"
+  showVars
 
   if [ "$opePart" = "STANDBY" ]
   then
 
     startStep "Verifications et preparation"
 
-    if  [ "$dbPassword" = "" ]
-    then
-      . $stbyEnvFile || die "Impossible de positionner l'environnement de la base $stbyDbName"
-      printf "%-75s : " "    - Recuperation du mot de passe dans le wallet DBaaS"
-      dbPassword=$(getPassDB)   
-      [ "$dbPassword" != "" ] && echo "OK" || echo "Vide"
-      if [ "$dbPassword" != "" ]
-      then
-        printf "%-75s : " "    - Verification de la connection a la base source"
-        res=$(exec_sql "sys/${dbPassword}@$primDbUniqueName as sysdba" "select 'X' from dual ;")
-        [ "$res" != "X" ] && { dbPassword="" ; echo "Incorrect" ; echo "$res" ; } || echo OK
-      fi
-    fi
-    if [ "$dbPassword" = "" ]
-    then
-      echo "
-      Le mot de passe dans le wallet de la base courante ne semble pas etre
-celui de la base primaire, entrez le mot de passe (ou changer celui du wallet).
-"
-      read -sp "    - Mot de passe SYS de la base primaire : " dbPassword
-      echo
-      printf "%-75s : " "    - Verification de la connection a la base source"
-      res=$(exec_sql "sys/${dbPassword}@$primDbUniqueName as sysdba" "select 'X' from dual ;")
-      [ "$res" != "X" ] && { dbPassword="" ; echo "Incorrect" ; echo "$res" ; die "MOt de passe de la base primaire incorrect" ; } || echo OK
-    fi
 
     echo
 
@@ -1028,11 +1055,6 @@ celui de la base primaire, entrez le mot de passe (ou changer celui du wallet).
     dbRole="NonLancee"
   fi
   echo $dbRole
-  if [ "$opePart" = "STANDBY" -a "$dbRole" = "PRIMARY" ]
-  then
-    dbRole="NonLancee"
-  fi
-
 
   if [ "$dbRole" = "PRIMARY" -a "$opePart" = "PRIMARY" ]
   then
@@ -1065,81 +1087,89 @@ suite des operations de déroule depuis la machine stand-by.
 
     - Connectez-vous à la machine de secours (noeud 1) et lancez :
  
-  $SCRIPT -m RunOnStandBY -d $primDbUniqueName -D $stbyDbUniqueName -s $scanLocal
+    $0 -m RunOnStandBY -d $primDbUniqueName -D $stbyDbUniqueName -s $scanPrimaire
+
+    Rajouter '-i' pour que le déroulement se fasse en interactif.
 
 ========================================================================
 "
+  elif [ "$dbRole" = "PRIMARY" -a "$opePart" = "STANDBY" ]
+  then
+    echo "
+    ATTENTION : La base sur le serveur courant est primaire, 
+    veuillez vérifier le serveur et supprimer la base manuellement 
+    si nécessaire en utilisant la commande suivante:
+
+    $0 -d $primDbUniqueName -D $stbyDbUniqueName -R
+
+    puis relancer la procedure precedente:
+
+    $0 -m RunOnStandBY -d $primDbUniqueName -D $stbyDbUniqueName -s $scanPrimaire 
+  
+    Rajouter '-i' pour que le déroulement se fasse en interactif.
+
+  "
   elif [ "$dbRole" = "NonLancee" -a "$opePart" = "STANDBY" ]
   then
-
-
-
-
   if  [ "$aRelancerEnBatch" = "Y" ]
-  then
-    echo
-    echo "+===========================================================================+"
-    echo "|       Les principales verifications ont ete faites, le script va etre     |"
-    echo "| Relance en tache de fond (nohup) avec les memes parametres                |"
-    echo "+===========================================================================+"
-    echo
-    echo "  Le fichier log sera:"
-    echo "   $LOG_FILE"
-    echo 
-    echo "+===========================================================================+"
+    then
+      echo
+      echo "+===========================================================================+"
+      echo "|       Les principales verifications ont ete faites, le script va etre     |"
+      echo "| Relance en tache de fond (nohup) avec les memes parametres                |"
+      echo "+===========================================================================+"
+      echo
+      echo "  Le fichier log sera:"
+      echo "   $LOG_FILE"
+      echo 
+      echo "+===========================================================================+"
 
-    #
-    #     On exporte les variables afin qu'elles soient reprises dans le script
-    #
+      #
+      #     On exporte les variables afin qu'elles soient reprises dans le script
+      #
 
-    export LOG_FILE
-    export aRelancerEnBatch=N
-    export dbPassword
-    export stbyEnvFile
-    rm -f $LOG_FILE
-    nohup $0 -m RunOnStandBY -d $primDbUniqueName -D $stbyDbUniqueName -s $scanOppose >/dev/null 2>&1 &
-    pid=$!
-    waitFor=30
-    echo " Script relance ..... (pid=$!) surveillance du process ($waitFor) secondes"
-    echo -n "  Surveillance de $pid --> "
-    i=1
-    while [ $i -le $waitFor ]
-    do
-      sleep 1
-      if ps -p $pid >/dev/null
-      then
-        [ $(($i % 10)) -eq 0 ] && { echo -n "+" ; } || { echo -n "." ; }
-      else
-         echo "Processus termine (erreur probable)"
-         echo 
-         echo "      --+--> Fin du fichier LOG"
-         tail -15 $LOG_FILE | sed -e "s;^;        | ;"
-         echo "        +----------------------"
+      export LOG_FILE
+      export aRelancerEnBatch=N
+      export dbPassword
+      export stbyEnvFile
+      rm -f $LOG_FILE
+      nohup $0 -m RunOnStandBY -d $primDbUniqueName -D $stbyDbUniqueName -s $scanOppose >/dev/null 2>&1 &
+      pid=$!
+      waitFor=30
+      echo " Script relance ..... (pid=$!) surveillance du process ($waitFor) secondes"
+      echo -n "  Surveillance de $pid --> "
+      i=1
+      while [ $i -le $waitFor ]
+      do
+        sleep 1
+        if ps -p $pid >/dev/null
+        then
+          [ $(($i % 10)) -eq 0 ] && { echo -n "+" ; } || { echo -n "." ; }
+        else
+           echo "Processus termine (erreur probable)"
+           echo 
+           echo "      --+--> Fin du fichier LOG"
+           tail -15 $LOG_FILE | sed -e "s;^;        | ;"
+           echo "        +----------------------"
 
-         die "Le processus batch s'est arrete" 
-      fi
-      i=$(($i + 1))
-    done  
-    echo
-    echo
-    echo "+===========================================================================+"
-    echo "La copie semble avoir ete lancee correctemenent"
-    echo "+===========================================================================+"
-    exit
-  fi
-
-
-
-
-
-
+           die "Le processus batch s'est arrete" 
+        fi
+        i=$(($i + 1))
+      done  
+      echo
+      echo
+      echo "+===========================================================================+"
+      echo "La copie semble avoir ete lancee correctemenent"
+      echo "+===========================================================================+"
+      exit
+    fi
     cleanASMBeforeCopy $laBase FORCE
     duplicateDBForStandBY
-  [    -f /tmp/${primDbUniqueName}_ewallet.p12 \
-    -o -f /tmp/${primDbUniqueName}_cwallet.sso \
-    -o -f /tmp/${primDbUniqueName}_passwd.ora ] && rm -f /tmp/${primDbUniqueName}_ewallet.p12 \
-                                                         /tmp/${primDbUniqueName}_cwallet.sso \
-                                                         /tmp/${primDbUniqueName}_passwd.ora
+    [    -f /tmp/${primDbUniqueName}_ewallet.p12 \
+      -o -f /tmp/${primDbUniqueName}_cwallet.sso \
+      -o -f /tmp/${primDbUniqueName}_passwd.ora ] && rm -f /tmp/${primDbUniqueName}_ewallet.p12 \
+                                                           /tmp/${primDbUniqueName}_cwallet.sso \
+                                                           /tmp/${primDbUniqueName}_passwd.ora
   fi
   endRun
 }
@@ -1222,7 +1252,7 @@ exec_dgmgrl()
 {
   local cmd=$1
   local lib=$2
-  printf "%-75s : " "      - $lib"
+  printf "%-75s : " "    - $lib"
   dgmgrl -silent sys/Wel_Come_12@$primDbUniqueName "$cmd" > $$.tmp 2>&1 \
     && { echo "OK" ; rm -f $$.tmp ; return 0 ; } \
     || { echo "ERREUR" ; cat $$.tmp ; rm -f $$.tmp ; return 1 ; }
@@ -1401,8 +1431,8 @@ usage()
 
 Usage :
  $SCRIPT [-d primDbName] [-D stbyDbName]
-         [-k keyStorePass] [-s scan] [-L degreParal]  [-G diskGroup]
-         [-C|-R] [-h|-?]
+         [-s scan]
+         [-C|-R|-V] [-h|-?]
 
          primDbName   : Base PRIMAIRE (db Name seulement)
          stbyDbName   : Base StandBy (db Unique Name seulement - elle doit exister)
@@ -1414,7 +1444,8 @@ Usage :
          -C           : Copie et migration d'une base (le script se relance
                         en nohup apres que les premieres verifications sont faites
                         sauf si -i est precise)
-         -R           : Supprime la PDB cible
+         -R           : Supprime la base (a lancer sur machine stand-by)
+         -V           : Verification de fonctionnement
          -i           : Ne relance pas le script en Nohup 
                         (pour enchainer par exemple)
          -?|-h        : Aide
@@ -1436,7 +1467,7 @@ SCRIPT=setUpDG.sh
 
 [ "$1" = "" ] && usage
 toShift=0
-while getopts m:d:D:k:s:L:G:CRTi opt
+while getopts m:d:D:s:CRTVi opt
 do
   case $opt in
    # --------- Source Database --------------------------------
@@ -1450,6 +1481,7 @@ do
    # --------- Modes de fonctionnement ------------------------
    C)   mode=CREATE              ; toShift=$(($toShift + 1)) ;;
    R)   mode=DELETE              ; toShift=$(($toShift + 1)) ;;
+   V)   mode=VERIFICATION        ; toShift=$(($toShift + 1)) ;;
    T)   mode=TEST                ; toShift=$(($toShift + 1)) ;;
    i)   aRelancerEnBatch=N       ; toShift=$(($toShift + 1)) ;;
    m)   ope=$OPTARG              ; toShift=$(($toShift + 2)) ;;
@@ -1473,20 +1505,22 @@ fi
 
 
 #
-#      Base de données source (Db Name)
+#      Base de données source (Db Unique Name)
 #
-primDbName=${primDbName:-tmpmig}
 if [ "$(echo $primDbName | grep "_")" != "" ]
 then
   primDbUniqueName=$primDbName
   primDbName=$(echo $primDbName | cut -f1 -d"_")
+else
+  die "Donner un DB Unique Name complet (base_suffixe)"
 fi
 
-stbyDbName=${stbyDbName:-tmpmig_fra1jz}
 if [ "$(echo $stbyDbName | grep "_")" != "" ]
 then
   stbyDbUniqueName=$stbyDbName
   stbyDbName=$(echo $stbyDbName | cut -f1 -d"_")
+else
+  die "Donner un DB Unique Name complet (base_suffixe)"
 fi
 #
 #   Adresse SCAN (Par défaut, HPR) DOMAINE=même domaine que
@@ -1517,10 +1551,11 @@ ASM_INSTANCE=$(ps -ef | grep smon_+ASM | grep -v grep |sed -e "s;^.*+ASM;+ASM;")
 if [ "$LOG_FILE" = "" ]
 then
   case $mode in
-    CREATE)    LOG_FILE=$LOG_DIR/dataGuard_CRE_${primDbName}_${DAT}.log ;;
-    DELETE)    LOG_FILE=$LOG_DIR/dataGuard_DEL_${primDbName}_${DAT}.log ;;
-    TEST)      LOG_FILE=/dev/null ;;
-    *)         die "Mode inconnu" ;;
+    CREATE)       LOG_FILE=$LOG_DIR/dataGuard_CRE_${primDbName}_${DAT}.log ;;
+    DELETE)       LOG_FILE=$LOG_DIR/dataGuard_DEL_${primDbName}_${DAT}.log ;;
+    TEST)         LOG_FILE=/dev/null                                       ;;
+    VERIFICATION) LOG_FILE=/dev/null                                       ;;
+    *)            die "Mode inconnu"                                       ;;
   esac
 fi
 
@@ -1528,78 +1563,137 @@ fi
 #    Controles basiques (il faut que l'on puisse poitionner l'environnement
 # base de données cible (et que ce soit la bonne!!!
 # -----------------------------------------------------------------------------
-
 checkDir $LOG_DIR || die "$LOG_DIR is incorrect"
 primEnvFile=${primEnvFile:-$HOME/$primDbName.env}
 stbyEnvFile=${stbyEnvFile:-$HOME/$stbyDbName.env}
-if [ "$opePart" = "PRIMARY" ]
+if [ "$mode" = "CREATE" ]
 then
+  if [ "$opePart" = "PRIMARY" ]
+  then
 
-  . $primEnvFile || die "Impossible de positionner l'environnement PRIMAIRE"
-  [ "$(exec_sql "/ as sysdba" "select  name from v\$database;")" != "${primDbName^^}" ] && die "Environnement mal positionne"
-  primDbUniqueName=$ORACLE_UNQNAME
+    . $primEnvFile || die "Impossible de positionner l'environnement PRIMAIRE"
+    [ "$ORACLE_UNQNAME" != "$primDbUniqueName" ] && die "Attention, l'environnement positionne ne correspond pas a : $primDbUniqueName"
+    echo "    - Mode : CREATE (Depuis base PRIMAIRE ($ORACLE_UNQNAME)"
+
+    [ "$(exec_sql "/ as sysdba" "select  name from v\$database;")" != "${primDbName^^}" ] && die "Environnement mal positionne"
+    primDbUniqueName=$ORACLE_UNQNAME
+    
+    scanStandBy=$scanOppose
+    domaineStandBy=$(echo $scanStandBy | sed -e "s;^[^\.]*\.\([^\:]*\).*$;\1;")  # Domaine du Scan
+    serviceStandBy=$stbyDbUniqueName.$domaineStandBy
+    tnsStandBy="//$scanStandBy/$serviceStandBy"
   
-  scanStandBy=$scanOppose
-  domaineStandBy=$(echo $scanStandBy | sed -e "s;^[^\.]*\.\([^\:]*\).*$;\1;")  # Domaine du Scan
-  serviceStandBy=$stbyDbUniqueName.$domaineStandBy
-  tnsStandBy="//$scanStandBy/$serviceStandBy"
+    scanLocal=$(srvctl config scan  | grep -i "SCAN name" | cut -f2 -d: | cut -f1 -d, | sed -e "s; ;;g"):1521
+    scanPrimaire=$scanLocal
+    domainePrimaire=$(echo $scanLocal | sed -e "s;^[^\.]*\.\([^\:]*\).*$;\1;")  # Domaine du Scan
+    servicePrimaire=$primDbUniqueName.$domainePrimaire
+    tnsPrimaire="//$scanLocal/$servicePrimaire"
+    grep "^${primDbUniqueName}:" /etc/oratab >/dev/null 2>&1 || die "$primDbUniqueName n'est pas dans /etc/oratab"
+
+    hostLocal=$(echo $scanLocal | cut -f1 -d:)
+    portLocal=$(echo $scanLocal | cut -f2 -d:)
+    hostOppose=$(echo $scanOppose | cut -f1 -d:)
+    portOppose=$(echo $scanOppose | cut -f2 -d:)
+    hostPrimaire=$hostLocal
+    portPrimaire=$portLocal
+    hostStandBy=$hostOppose
+    portStandBy=$portOppose
+
+  elif [ "$opePart" = "STANDBY" ]
+  then
+
+    . $stbyEnvFile || die "Impossible de positionner l'environnement STANDBY"
+    [ "$ORACLE_UNQNAME" != "$stbyDbUniqueName" ] && die "Attention, l'environnement positionne ne correspond pas a : $stbyDbUniqueName"
+    echo "    - Mode : CREATE (Depuis base STANDBY ($ORACLE_UNQNAME)"
+
+    stbyDbUniqueName=$ORACLE_UNQNAME
+
+    scanLocal=$(srvctl config scan  | grep -i "SCAN name" | cut -f2 -d: | cut -f1 -d, | sed -e "s; ;;g"):1521
+    scanStandBy=$scanLocal
+    domaineStandBy=$(echo $scanLocal | sed -e "s;^[^\.]*\.\([^\:]*\).*$;\1;")  # Domaine du Scan
+    serviceStandBy=$stbyDbUniqueName.$domaineStandBy
+    tnsStandBy="//$scanLocal/$serviceStandBy"
   
-  scanLocal=$(srvctl config scan  | grep -i "SCAN name" | cut -f2 -d: | cut -f1 -d, | sed -e "s; ;;g"):1521
-  scanPrimaire=$scanLocal
-  domainePrimaire=$(echo $scanLocal | sed -e "s;^[^\.]*\.\([^\:]*\).*$;\1;")  # Domaine du Scan
-  servicePrimaire=$primDbUniqueName.$domainePrimaire
-  tnsPrimaire="//$scanLocal/$servicePrimaire"
-  grep "^${primDbUniqueName}:" /etc/oratab >/dev/null 2>&1 || die "$primDbUniqueName n'est pas dans /etc/oratab"
+    scanPrimaire=$scanOppose
+    domainePrimaire=$(echo $scanPrimaire | sed -e "s;^[^\.]*\.\([^\:]*\).*$;\1;")  # Domaine du Scan
+    servicePrimaire=$primDbUniqueName.$domainePrimaire
+    tnsPrimaire="//$scanPrimaire/$servicePrimaire"
 
-  hostLocal=$(echo $scanLocal | cut -f1 -d:)
-  portLocal=$(echo $scanLocal | cut -f2 -d:)
-  hostOppose=$(echo $scanOppose | cut -f1 -d:)
-  portOppose=$(echo $scanOppose | cut -f2 -d:)
-  hostPrimaire=$hostLocal
-  portPrimaire=$portLocal
-  hostStandBy=$hostOppose
-  portStandBy=$portOppose
+    hostLocal=$(echo $scanLocal | cut -f1 -d:)
+    portLocal=$(echo $scanLocal | cut -f2 -d:)
+    hostOppose=$(echo $scanOppose | cut -f1 -d:)
+    portOppose=$(echo $scanOppose | cut -f2 -d:)
+    hostPrimaire=$hostOppose
+    portPrimaire=$portOppose
+    hostStandBy=$hostLocal
+    portStandBy=$portLocal
 
-else
 
+    grep "^${stbyDbUniqueName}:" /etc/oratab >/dev/null 2>&1 || die "$stbyDbUniqueName n'est pas dans /etc/oratab"
+  fi
+  tnsTestConnect=$tnsPrimaire
+elif [ "$mode" = "VERIFICATION" -o "$mode" = "TEST" ]
+then
+  if grep "^${stbyDbUniqueName}:" /etc/oratab >/dev/null 2>&1
+  then
+    . $stbyEnvFile || die "Impossible de positionner l'environnement STANDBY"
+    [ "$ORACLE_UNQNAME" != "$stbyDbUniqueName" ] && die "Attention, l'environnement positionne ne correspond pas a : $stbyDbUniqueName"
+    echo "    - Mode : VERIFICATION (Depuis base STAND-BY ($ORACLE_UNQNAME)"
+  else
+    . $primEnvFile || die "Impossible de positionner l'environnement PRIMAIRE"
+    [ "$ORACLE_UNQNAME" != "$primDbUniqueName" ] && die "Attention, l'environnement positionne ne correspond pas a : $primDbUniqueName"
+    echo "    - Mode : VERIFICATION (Depuis base PRIMAIRE ($ORACLE_UNQNAME)"
+  fi
+  tnsTestConnect=$ORACLE_UNQNAME
+elif [ "$mode" = "DELETE" ]
+then
   . $stbyEnvFile || die "Impossible de positionner l'environnement STANDBY"
-
-  stbyDbUniqueName=$ORACLE_UNQNAME
-
-  scanLocal=$(srvctl config scan  | grep -i "SCAN name" | cut -f2 -d: | cut -f1 -d, | sed -e "s; ;;g"):1521
-  scanStandBy=$scanLocal
-  domaineStandBy=$(echo $scanLocal | sed -e "s;^[^\.]*\.\([^\:]*\).*$;\1;")  # Domaine du Scan
-  serviceStandBy=$stbyDbUniqueName.$domaineStandBy
-  tnsStandBy="//$scanLocal/$serviceStandBy"
-  
-  scanPrimaire=$scanOppose
-  domainePrimaire=$(echo $scanPrimaire | sed -e "s;^[^\.]*\.\([^\:]*\).*$;\1;")  # Domaine du Scan
-  servicePrimaire=$primDbUniqueName.$domainePrimaire
-  tnsPrimaire="//$scanPrimaire/$servicePrimaire"
-
-  hostLocal=$(echo $scanLocal | cut -f1 -d:)
-  portLocal=$(echo $scanLocal | cut -f2 -d:)
-  hostOppose=$(echo $scanOppose | cut -f1 -d:)
-  portOppose=$(echo $scanOppose | cut -f2 -d:)
-  hostPrimaire=$hostOppose
-  portPrimaire=$portOppose
-  hostStandBy=$hostLocal
-  portStandBy=$portLocal
-
-
-  grep "^${stbyDbUniqueName}:" /etc/oratab >/dev/null 2>&1 || die "$stbyDbUniqueName n'est pas dans /etc/oratab"
-
+  [ "$ORACLE_UNQNAME" != "$stbyDbUniqueName" ] && die "Attention, l'environnement positionne ne correspond pas a : $stbyDbUniqueName"
+    echo "    - Mode : DELETE (Depuis base PRIMAIRE ($ORACLE_UNQNAME)"
+  tnsTestConnect=
 fi
 
 dbServerOppose=$(echo $hostOppose | sed -e "s;^\(.*\)\(-scan\)\(.*\)$;\11\3;")
 
+#showVars
+#exit
+
 # -----------------------------------------------------------------------------
 #      Lancement de l'exécution
 # -----------------------------------------------------------------------------
+if [ "$tnsTestConnect" != "" ]
+then
+  if  [ "$dbPassword" = "" ]
+  then
+    . $stbyEnvFile || die "Impossible de positionner l'environnement de la base $stbyDbName"
+    printf "%-75s : " "    - Recuperation du mot de passe dans le wallet DBaaS"
+    dbPassword=$(getPassDB)   
+    [ "$dbPassword" != "" ] && echo "OK" || echo "Vide"
+    if [ "$dbPassword" != "" ]
+    then
+      printf "%-75s : " "    - Verification de la connection a la base source"
+      res=$(exec_sql "sys/${dbPassword}@$tnsTestConnect as sysdba" "select 'X' from dual ;")
+      [ "$res" != "X" ] && { dbPassword="" ; echo "Incorrect" ; echo "$res" ; } || echo OK
+    fi
+  fi
+  if [ "$dbPassword" = "" ]
+  then
+    echo "
+    Le mot de passe dans le wallet de la base courante ne semble pas etre
+  celui de la base primaire, entrez le mot de passe (ou changer celui du wallet).
+  "
+    read -sp "    - Mot de passe SYS de la base primaire : " dbPassword
+    echo
+    printf "%-75s : " "    - Verification de la connection a la base source"
+    res=$(exec_sql "sys/${dbPassword}@$tnsTestConnect as sysdba" "select 'X' from dual ;")
+    [ "$res" != "X" ] && { dbPassword="" ; echo "Incorrect" ; echo "$res" ; die "MOt de passe de la base primaire incorrect" ; } || echo OK
+  fi
+fi
 
 case $mode in
- CREATE) createDG       2>&1 | tee $LOG_FILE ;;
- DELETE) deleteStandBy  2>&1 | tee $LOG_FILE ;;
- TEST)   testUnit       2>&1 | tee $LOG_FILE ;;
+ CREATE)         createDG       2>&1 | tee $LOG_FILE ;;
+ DELETE)         deleteStandBy  2>&1 | tee $LOG_FILE ;;
+ TEST)           testUnit       2>&1 | tee $LOG_FILE ;;
+ VERIFICATION)   verificationDG 2>&1 | tee $LOG_FILE ;;
 esac
 
