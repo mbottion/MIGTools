@@ -1,4 +1,4 @@
-VERSION=1.0
+VERSION=1.1
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 #
 #   Appelé par l'option -T, permet de tester des parties de script
@@ -70,7 +70,13 @@ verificationDG()
   echo Validate database $stbyDbUniqueName
   echo ===============================================================
   dgmgrl -silent / "validate database verbose $stbyDbUniqueName"
+
   echo ===============================================================
+  echo Configuration
+  echo ===============================================================
+  dgmgrl -silent / "show configuration"
+  echo ===============================================================
+
 }
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 #
@@ -141,6 +147,7 @@ end;
   exec_sql -verbose "/ as sysdba" \
                     "alter system set DB_BLOCK_CHECKING=FALSE scope=both sid='*'; " \
                     "    - DB Block Checking = FALSE"
+
 
   echo
   echo "  - Dataguard Broker (Primary : $primDbUniqueName)"
@@ -258,9 +265,15 @@ end;
       || die "Impossible d'ouvrir la base de donnees"
   fi
 
+  exec_sql -verbose "/ as sysdba" \
+                    "alter database flashback on ; " \
+                    "    - Mise en flashback de la base stand-by"
 
   addDGService ${primDbName}_dg    PRIMARY          N
   addDGService ${primDbName}_dg_ro PHYSICAL_STANDBY Y
+
+  exec_dgmgrl "edit database '$stbyDbUniqueName' set state=apply-on" \
+              "Forcage de Apply-ON" || die "Erreur DGMGRL"
 
   verificationDG
 
@@ -322,7 +335,7 @@ alter system set log_file_name_convert=
   echo "     Note : La restauration peut être suivie dans : "
   echo "     $LOG_TMP"
   printf "%-75s : " "      - Restoration de la base"
-  rman target sys/Wel_Come_12 >$LOG_TMP 2>&1 <<%%
+  rman target sys/${dbPassword} >$LOG_TMP 2>&1 <<%%
 run { 
 allocate channel C1 type disk  ;
 allocate channel C2 type disk  ;
@@ -341,7 +354,7 @@ restore  database from service '$primDbUniqueName' section size 64G;
   echo "     Note : La restauration peut être suivie dans : "
   echo "     $LOG_TMP"
   printf "%-75s : " "      - Recover de la base"
-  rman target sys/Wel_Come_12 >$LOG_TMP 2>&1 <<%%
+  rman target sys/${dbPassword} >$LOG_TMP 2>&1 <<%%
 run { 
 allocate channel C1 type disk  ;
 allocate channel C2 type disk  ;
@@ -864,7 +877,9 @@ cleanASMBeforeCopy()
   then
     
     echo
-    exec_dgmgrl "remove configuration" "Suppression de la configuration DGMGRL si elle existe"
+    echo "       NOTE : (Il est possible que l'étape ci-dessous soit en erreur, ce n'est pas"
+    echo "              grave si les étapes suivantes se passent correctement)"
+    exec_dgmgrl "/" "remove configuration" "Suppression de la configuration DGMGRL si elle existe"
 
     echo
     saveSpfile=$LOG_DIR/init_${stbyDbUniqueName}_${DAT}.ora
@@ -1254,10 +1269,17 @@ ERROR :
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 exec_dgmgrl()
 {
+  if [ "$3" != "" ]
+  then
+    local connect="$1"
+    shift
+  else
+    local connect="sys/${dbPassword}@${primDbUniqueName}"
+  fi
   local cmd=$1
   local lib=$2
   printf "%-75s : " "    - $lib"
-  dgmgrl -silent sys/Wel_Come_12@$primDbUniqueName "$cmd" > $$.tmp 2>&1 \
+  dgmgrl -silent "$connect" "$cmd" > $$.tmp 2>&1 \
     && { echo "OK" ; rm -f $$.tmp ; return 0 ; } \
     || { echo "ERREUR" ; cat $$.tmp ; rm -f $$.tmp ; return 1 ; }
 }
@@ -1446,7 +1468,7 @@ Usage :
                         sauf si -i est precise)
          -R           : Supprime la base (a lancer sur machine stand-by)
          -V           : Verification de fonctionnement
-         -i           : Ne relance pas le script en Nohup 
+         -F           : Ne relance pas le script en Nohup (Foreground)
                         (pour enchainer par exemple)
          -?|-h        : Aide
 
@@ -1467,7 +1489,7 @@ SCRIPT=setUpDG.sh
 
 [ "$1" = "" ] && usage
 toShift=0
-while getopts m:d:D:s:hCRTVi opt
+while getopts m:d:D:s:hCRTVF opt
 do
   case $opt in
    # --------- Source Database --------------------------------
@@ -1483,7 +1505,7 @@ do
    R)   mode=DELETE              ; toShift=$(($toShift + 1)) ;;
    V)   mode=VERIFICATION        ; toShift=$(($toShift + 1)) ;;
    T)   mode=TEST                ; toShift=$(($toShift + 1)) ;;
-   i)   aRelancerEnBatch=N       ; toShift=$(($toShift + 1)) ;;
+   F)   aRelancerEnBatch=N       ; toShift=$(($toShift + 1)) ;;
    m)   ope=$OPTARG              ; toShift=$(($toShift + 2)) ;;
    # --------- Usage ------------------------------------------
    ?|h) usage "Aide demandee";;
