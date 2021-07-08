@@ -1,4 +1,4 @@
-VERSION=1.1
+VERSION=1.2
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 #
 #   Appelé par l'option -T, permet de tester des parties de script
@@ -41,7 +41,7 @@ testUnit()
 #
 #    Le mode de passe de TDE (-k) est récupéré dans le wallet
 #  dbaas si celui-ci est accessible. Le parallélisme peu être 
-#  contrôlé avec (-L). Si (-i) est spécifié, l'exécution est 
+#  contrôlé avec (-L). Si (-F) est spécifié, l'exécution est 
 #  entièrement faite en interactif (attention aux déconnexions)
 #
 #   Fonctionnement
@@ -52,7 +52,7 @@ testUnit()
 # les commandes à passer sur la ,base source (copie/coller)
 #
 #
-#    A moins que l'option -i ne soit spécifiés dans les paramètres d'appel,
+#    A moins que l'option -F ne soit spécifiés dans les paramètres d'appel,
 #  le script, lancé en interactif opère les premières vérifications, puis 
 #  se relance automatiquement en nohup. Après ce lancement, on attend 30
 #  secondes avant de rendre la main pour vérifier qu'il n'y a pas d'erreur 
@@ -980,9 +980,9 @@ Usage :
          degreParal   : Parallelisme             : Defaut 150
          -C           : Copie et migration d'une base (le script se relance
                         en nohup apres que les premieres verifications sont faites
-                        sauf si -i est precise)
+                        sauf si -F est precise)
          -R           : Supprime la PDB cible
-         -i           : Ne relance pas le script en Nohup 
+         -F           : Ne relance pas le script en Nohup 
                         (pour enchainer par exemple)
          -?|-h        : Aide
 
@@ -1000,7 +1000,7 @@ SCRIPT=migRunDest.sh
 
 [ "$1" = "" ] && usage
 toShift=0
-while getopts d:p:D:P:k:s:L:G:CRTi opt
+while getopts d:p:D:P:k:s:L:G:CRTF opt
 do
   case $opt in
    # --------- Source Database --------------------------------
@@ -1018,7 +1018,7 @@ do
    C)   mode=COPY                ; toShift=$(($toShift + 1)) ;;
    R)   mode=DELETE              ; toShift=$(($toShift + 1)) ;;
    T)   mode=TEST                ; toShift=$(($toShift + 1)) ;;
-   i)   aRelancerEnBatch=N       ; toShift=$(($toShift + 1)) ;;
+   F)   aRelancerEnBatch=N       ; toShift=$(($toShift + 1)) ;;
    # --------- Usage ------------------------------------------
    ?|h) usage "Aide demandee";;
   esac
