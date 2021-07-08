@@ -1073,9 +1073,9 @@ where isomf(f.name)='N'
       echo
 
       die "Veuillez convertir les fichiers en OMF en utilisant les commandes ci-dessus"
+    else
+      echo "    - Les fichiers sont tous en OMF"
     fi
-
-exit
 
     echo
     echo "    - On est sur la machine stand-by, la base ne doit pas pouvoir etre lancee"
