@@ -1,4 +1,4 @@
-VERSION=1.1
+VERSION=1.3
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 #
 #   Appelé par l'option -T, permet de tester des parties de script
@@ -316,10 +316,15 @@ run { restore standby controlfile from service '$primDbUniqueName' ; }
 %%
   [ $? -eq 0 ] && { echo OK ; rm -f $$.tmp ; } \
                || { echo ERREUR ; cat $$.tmp ; rm -f $$.tmp ; die "Erreur de restoration du control file" ; }
+#  exec_sql "/ as sysdba" "
+#alter system set log_file_name_convert=
+#       '+DATAC1/$primDbUniqueName','+DATAC1/$stbyDbUniqueName'
+#      ,'+RECOC1/$primDbUniqueName','+RECOC1/$stbyDbUniqueName' scope=spfile ;" "      - log_file_name_convert" \
+#      || die "Impossible de positionner log_file_name_convert"
   exec_sql "/ as sysdba" "
 alter system set log_file_name_convert=
-       '+DATAC1/$primDbUniqueName','+DATAC1/$stbyDbUniqueName'
-      ,'+RECOC1/$primDbUniqueName','+RECOC1/$stbyDbUniqueName' scope=spfile ;" "      - log_file_name_convert" \
+       '+DATAC1/$primDbUniqueName','+DATAC1'
+      ,'+RECOC1/$primDbUniqueName','+RECOC1' scope=spfile ;" "      - log_file_name_convert" \
       || die "Impossible de positionner log_file_name_convert"
 
   exec_srvctl "stop database -d $stbyDbUniqueName" \
@@ -335,40 +340,28 @@ alter system set log_file_name_convert=
   echo "     Note : La restauration peut être suivie dans : "
   echo "     $LOG_TMP"
   printf "%-75s : " "      - Restoration de la base"
-  rman target sys/${dbPassword} >$LOG_TMP 2>&1 <<%%
-run { 
-allocate channel C1 type disk  ;
-allocate channel C2 type disk  ;
-allocate channel C3 type disk  ;
-allocate channel C4 type disk  ;
-allocate channel C5 type disk  ;
-allocate channel C6 type disk  ;
-allocate channel C7 type disk  ;
-allocate channel C8 type disk  ;
-restore  database from service '$primDbUniqueName' section size 64G; 
+cat >/tmp/rman1_$$.txt <<%%
+run {
+$channelClause
+restore  database from service '$primDbUniqueName' section size $sectionSize;
 }
 %%
-  [ $? -eq 0 ] && { echo OK ; cat $LOG_TMP ; rm -f $LOG_TMP; } \
-               || { echo ERREUR ; cat $LOG_TMP  ; rm -f $LOG_TMP; die "Erreur de restauration de la base" ; }
+  rman target sys/${dbPassword} >$LOG_TMP 2>&1 </tmp/rman1_$$.txt
+  [ $? -eq 0 ] && { echo OK ; cat $LOG_TMP ; rm -f $LOG_TMP; rm -f /tmp/rman1_$$.txt ; } \
+               || { echo ERREUR ; cat $LOG_TMP  ; rm -f $LOG_TMP; die "Erreur de restauration de la base" ; rm -f /tmp/rman1_$$.txt ; }
 
   echo "     Note : La restauration peut être suivie dans : "
   echo "     $LOG_TMP"
   printf "%-75s : " "      - Recover de la base"
-  rman target sys/${dbPassword} >$LOG_TMP 2>&1 <<%%
-run { 
-allocate channel C1 type disk  ;
-allocate channel C2 type disk  ;
-allocate channel C3 type disk  ;
-allocate channel C4 type disk  ;
-allocate channel C5 type disk  ;
-allocate channel C6 type disk  ;
-allocate channel C7 type disk  ;
-allocate channel C8 type disk  ;
-recover  database from service '$primDbUniqueName' section size 64G; 
+cat >/tmp/rman2_$$.txt <<%%
+run {
+$channelClause
+recover  database from service '$primDbUniqueName' section size $sectionSize;
 }
 %%
-  [ $? -eq 0 ] && { echo OK ; cat $LOG_TMP ; rm -f $LOG_TMP; } \
-               || { echo ERREUR ; cat $LOG_TMP  ; rm -f $LOG_TMP; die "Erreur de Recover de la base" ; }
+  rman target sys/${dbPassword} >$LOG_TMP 2>&1 </tmp/rman2_$$.txt
+  [ $? -eq 0 ] && { echo OK ; cat $LOG_TMP ; rm -f $LOG_TMP; rm -f /tmp/rman2_$$.txt ; } \
+               || { echo ERREUR ; cat $LOG_TMP  ; rm -f $LOG_TMP; die "Erreur de Recover de la base" ; rm -f /tmp/rman2_$$.txt ; }
 
   endStep
   echo
@@ -878,7 +871,8 @@ cleanASMBeforeCopy()
     
     echo
     echo "       NOTE : (Il est possible que l'étape ci-dessous soit en erreur, ce n'est pas"
-    echo "              grave si les étapes suivantes se passent correctement)"
+    echo "              grave si les étapes suivantes se passent correctement, si le traitement"
+    echo "              bloque, stopper la base avant de relancer)"
     exec_dgmgrl "/" "remove configuration" "Suppression de la configuration DGMGRL si elle existe"
 
     echo
@@ -1457,12 +1451,13 @@ usage()
 
 Usage :
  $SCRIPT [-d primDbName] [-D stbyDbName]
-         [-s scan]
+         [-s scan] [L Channels]
          [-C|-R|-V] [-h|-?]
 
          primDbName   : Base PRIMAIRE (db Unique Name)
          stbyDbName   : Base StandBy (db Unique Name - elle doit exister)
          scan         : Adresse Scan (host:port) de la contrepartie: Defaut HPR
+         Channels     : Nombre de canaux RMAN a utiliser : defaut 64
          -C           : Copie et migration d'une base (le script se relance
                         en nohup apres que les premieres verifications sont faites
                         sauf si -i est precise)
@@ -1489,7 +1484,7 @@ SCRIPT=setUpDG.sh
 
 [ "$1" = "" ] && usage
 toShift=0
-while getopts m:d:D:s:hCRTVF opt
+while getopts m:d:D:s:hL:CRTVF opt
 do
   case $opt in
    # --------- Source Database --------------------------------
@@ -1499,7 +1494,7 @@ do
    # --------- Keystore, Scan ... -----------------------------
    k)   keyStorePassword=$OPTARG ; toShift=$(($toShift + 2)) ;;
    s)   scanOppose=$OPTARG       ; toShift=$(($toShift + 2)) ;;
-   G)   dstDiskGroup=$OPTARG     ; toShift=$(($toShift + 2)) ;;
+   L)   maxRmanChannels=$OPTARG  ; toShift=$(($toShift + 2)) ;;
    # --------- Modes de fonctionnement ------------------------
    C)   mode=CREATE              ; toShift=$(($toShift + 1)) ;;
    R)   mode=DELETE              ; toShift=$(($toShift + 1)) ;;
@@ -1525,6 +1520,8 @@ else
   opePart="PRIMARY"
 fi
 
+maxRmanChannels=${maxRmanChannels:-64}
+sectionSize="32G"
 
 #
 #      Base de données source (Db Unique Name)
@@ -1676,6 +1673,15 @@ then
 fi
 
 dbServerOppose=$(echo $hostOppose | sed -e "s;^\(.*\)\(-scan\)\(.*\)$;\11\3;")
+
+channelClause=""
+i=1
+while [ $i -le $maxRmanChannels ]
+do
+  channelClause="$channelClause
+allocate channel C$i type disk ;"
+    i=$(($i + 1))
+done
 
 #showVars
 #exit
