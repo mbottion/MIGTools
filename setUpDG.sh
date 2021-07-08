@@ -316,16 +316,18 @@ run { restore standby controlfile from service '$primDbUniqueName' ; }
 %%
   [ $? -eq 0 ] && { echo OK ; rm -f $$.tmp ; } \
                || { echo ERREUR ; cat $$.tmp ; rm -f $$.tmp ; die "Erreur de restoration du control file" ; }
-#  exec_sql "/ as sysdba" "
-#alter system set log_file_name_convert=
-#       '+DATAC1/$primDbUniqueName','+DATAC1/$stbyDbUniqueName'
-#      ,'+RECOC1/$primDbUniqueName','+RECOC1/$stbyDbUniqueName' scope=spfile ;" "      - log_file_name_convert" \
-#      || die "Impossible de positionner log_file_name_convert"
   exec_sql "/ as sysdba" "
 alter system set log_file_name_convert=
-       '+DATAC1/$primDbUniqueName','+DATAC1'
-      ,'+RECOC1/$primDbUniqueName','+RECOC1' scope=spfile ;" "      - log_file_name_convert" \
+       '+DATAC1/$primDbUniqueName','+DATAC1/$stbyDbUniqueName'
+      ,'+DATAC1/${primDbUniqueName^^}','+DATAC1/${stbyDbUniqueName^^}'
+      ,'+RECOC1/${primDbUniqueName^^}','+RECOC1/${stbyDbUniqueName^^}'
+      ,'+RECOC1/$primDbUniqueName','+RECOC1/$stbyDbUniqueName' scope=spfile ;" "      - log_file_name_convert" \
       || die "Impossible de positionner log_file_name_convert"
+#  exec_sql "/ as sysdba" "
+#alter system set log_file_name_convert=
+#       '+DATAC1/$primDbUniqueName','+DATAC1'
+#      ,'+RECOC1/$primDbUniqueName','+RECOC1' scope=spfile ;" "      - log_file_name_convert" \
+#      || die "Impossible de positionner log_file_name_convert"
 
   exec_srvctl "stop database -d $stbyDbUniqueName" \
               "      - Arret de la base" \
@@ -1020,6 +1022,60 @@ createDG()
 
 
     echo
+
+    echo "    - Verification des fichiers de la base source, ils doivent etre OMF"
+    nonOMF=$(exec_sql "sys/${dbPassword}@$tnsTestConnect as sysdba" "
+with 
+function isomf( name v\$dbfile.name%type) return char as
+ isomf boolean;
+ isasm boolean;
+begin
+ dbms_backup_restore.isfilenameomf(name,isomf,isasm);
+ if isomf then return 'Y'; else return 'N'; end if;
+end;
+select to_char(count(*))
+from v\$dbfile
+where isomf(name)='N'
+/
+"
+)
+    if [ "$nonOMF" != "0" ]
+    then
+      echo
+      echo "Il reste $nonOMF fichiers non OMF"
+      echo "Commandes pour transformer les fichiers en OMF (ONLINE)"
+      echo 
+      echo "-- -----------------------------------------------------"
+      echo 
+      echo "sqlplus / as sysdba <<%%"
+      exec_sql "sys/${dbPassword}@$tnsTestConnect as sysdba" "
+col a format a200 newline
+with 
+function isomf( name v\$dbfile.name%type) return char as
+ isomf boolean;
+ isasm boolean;
+begin
+ dbms_backup_restore.isfilenameomf(name,isomf,isasm);
+ if isomf then return 'Y'; else return 'N'; end if;
+end;
+select 
+   'alter session set container=' || p.name || ';' a
+  ,'alter database move datafile ''' || f.name || ''' ;' a
+from v\$dbfile f
+join v\$pdbs p on (f.con_id=p.con_id)
+where isomf(f.name)='N'
+/
+"
+      echo "%%"
+      echo 
+      echo "-- -----------------------------------------------------"
+
+      echo
+
+      die "Veuillez convertir les fichiers en OMF en utilisant les commandes ci-dessus"
+    fi
+
+exit
 
     echo
     echo "    - On est sur la machine stand-by, la base ne doit pas pouvoir etre lancee"
