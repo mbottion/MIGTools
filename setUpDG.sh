@@ -1,4 +1,4 @@
-VERSION=1.3
+VERSION=1.4
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 #
 #   Appelé par l'option -T, permet de tester des parties de script
@@ -312,19 +312,28 @@ duplicateDBForStandBY()
 
   printf "%-75s : " "      - Restoration du control file"
   rman target / >$$.tmp 2>&1 <<%%
-run { restore standby controlfile from service '$primDbUniqueName' ; }
+run { 
+restore standby controlfile from service '$primDbUniqueName' ; 
+}
 %%
   [ $? -eq 0 ] && { echo OK ; rm -f $$.tmp ; } \
                || { echo ERREUR ; cat $$.tmp ; rm -f $$.tmp ; die "Erreur de restoration du control file" ; }
-  exec_sql "/ as sysdba" "
-alter system set log_file_name_convert=
-       '+DATAC1/$primDbUniqueName','+DATAC1/$stbyDbUniqueName'
-      ,'+DATAC1/${primDbUniqueName^^}','+DATAC1/${stbyDbUniqueName^^}'
-      ,'+RECOC1/${primDbUniqueName^^}','+RECOC1/${stbyDbUniqueName^^}'
-      ,'+RECOC1/$primDbUniqueName','+RECOC1/$stbyDbUniqueName' scope=spfile ;" "      - log_file_name_convert" \
-      || die "Impossible de positionner log_file_name_convert"
 #  exec_sql "/ as sysdba" "
-#alter system set log_file_name_convert=
+#    alter system set db_file_name_convert=
+#       '+DATAC1/$primDbUniqueName','+DATAC1/$stbyDbUniqueName'
+#      ,'+RECOC1/$primDbUniqueName','+RECOC1/$stbyDbUniqueName' scope=spfile ;" "      - db_file_name_convert" \
+#      || die "Impossible de positionner db_file_name_convert"
+  exec_sql "/ as sysdba" "
+    alter system reset db_file_name_convert scope=spfile ;" "      - reset db_file_name_convert" 
+  exec_sql "/ as sysdba" "
+    alter system reset log_file_name_convert scope=spfile ;" "      - reset log_file_name_convert" 
+#  exec_sql "/ as sysdba" "
+#    alter system set log_file_name_convert=
+#       '+DATAC1/$primDbUniqueName','+DATAC1/$stbyDbUniqueName'
+#      ,'+RECOC1/$primDbUniqueName','+RECOC1/$stbyDbUniqueName' scope=spfile ;" "      - log_file_name_convert" \
+#      || die "Impossible de positionner log_file_name_convert"
+#  exec_sql "/ as sysdba" "
+#    alter system set log_file_name_convert=
 #       '+DATAC1/$primDbUniqueName','+DATAC1'
 #      ,'+RECOC1/$primDbUniqueName','+RECOC1' scope=spfile ;" "      - log_file_name_convert" \
 #      || die "Impossible de positionner log_file_name_convert"
@@ -344,13 +353,19 @@ alter system set log_file_name_convert=
   printf "%-75s : " "      - Restoration de la base"
 cat >/tmp/rman1_$$.txt <<%%
 run {
+set newname for database to NEW ;
+set newname for pluggable database $listePDB to NEW ;
 $channelClause
+
 restore  database from service '$primDbUniqueName' section size $sectionSize;
+switch datafile all ;
+switch tempfile all ;
 }
 %%
   rman target sys/${dbPassword} >$LOG_TMP 2>&1 </tmp/rman1_$$.txt
   [ $? -eq 0 ] && { echo OK ; cat $LOG_TMP ; rm -f $LOG_TMP; rm -f /tmp/rman1_$$.txt ; } \
                || { echo ERREUR ; cat $LOG_TMP  ; rm -f $LOG_TMP; die "Erreur de restauration de la base" ; rm -f /tmp/rman1_$$.txt ; }
+
 
   echo "     Note : La restauration peut être suivie dans : "
   echo "     $LOG_TMP"
@@ -369,6 +384,10 @@ recover  database from service '$primDbUniqueName' section size $sectionSize;
   echo
   echo "  - Attente 30 secondes"
   sleep 30
+  exec_sql "/ as sysdba" "
+alter system reset db_file_name_convert ;" "      - reset db_file_name_convert" 
+  exec_sql "/ as sysdba" "
+alter system reset log_file_name_convert ;" "      - reset log_file_name_convert" 
   finalisationDG
 }
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
@@ -930,6 +949,8 @@ create pfile='$saveSpfile' from spfile;" "    - Sauvegarde du SPFILE" ; status=$
     echo
     removeASMDir "+DATAC1/$stbyDbUniqueName"
     removeASMDir "+RECOC1/$stbyDbUniqueName"
+    removeASMDir "+DATAC1/$primDbUniqueName"
+    removeASMDir "+RECOC1/$primDbUniqueName"
     echo
     if [ "$2" != "DELETEONLY" ]
     then
@@ -1072,11 +1093,14 @@ where isomf(f.name)='N'
 
       echo
 
-      die "Veuillez convertir les fichiers en OMF en utilisant les commandes ci-dessus"
+      #die "Veuillez convertir les fichiers en OMF en utilisant les commandes ci-dessus"
     else
       echo "    - Les fichiers sont tous en OMF"
     fi
 
+    listePDB=$(exec_sql "sys/${dbPassword}@$tnsTestConnect as sysdba" "select listagg(name,',') from v\$pdbs where name not like '%SEED%' ;")
+    echo
+    echo "    - Liste des PDB : $listePDB"
     echo
     echo "    - On est sur la machine stand-by, la base ne doit pas pouvoir etre lancee"
     if [ "$(srvctl status database -d $stbyDbUniqueName | grep -i running | grep -vi "not running")" != "" ]
@@ -1397,6 +1421,7 @@ removeASMDir()
     exec_asmcmd "rm -rf $dir" "    - Suppression du repertoire $dir" "Ok" "Erreur" "Impossible de supprimer $dir"
     return $?
   else
+    echo "    - $dir n'existe pas"
     return 0
   fi
 }
