@@ -1,4 +1,4 @@
-VERSION=1.4
+VERSION=1.5
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 #
 #   Appelé par l'option -T, permet de tester des parties de script
@@ -192,14 +192,16 @@ end;
 
   exec_dgmgrl "add database '$stbyDbUniqueName' as connect identifier is '$stbyDbUniqueName' maintained as physical" \
               "Ajout de la base stand-by" || die "Erreur DGMGRL"
+  exec_dgmgrl "EDIT CONFIGURATION SET PROPERTY OperationTimeout=600" \
+              "Operation Timeout" || die "Erreur DGMGRL(OperationTimeout)"
   exec_dgmgrl "edit configuration set protection mode as MaxPerformance" \
-              "Mode de protection" || die "Erreur DGMGRL"
+              "Mode de protection" || die "Erreur DGMGRL (MaxPerformance)"
   exec_dgmgrl "edit database '$primDbUniqueName' set property NetTimeout=30" \
-              "NetTimeout (Primary)" || die "Erreur DGMGRL"
+              "NetTimeout (Primary)" || die "Erreur DGMGRL (NetTimeout)"
   exec_dgmgrl "edit database '$stbyDbUniqueName' set property LogXptMode='ASYNC'" \
-              "LoXptMode (Stand-by)" || die "Erreur DGMGRL"
+              "LoXptMode (Stand-by)" || die "Erreur DGMGRL (LogXptMode)"
   exec_dgmgrl "edit database '$stbyDbUniqueName' set property NetTimeout=30" \
-              "NetTimetout (STand-by)" || die "Erreur DGMGRL"
+              "NetTimetout (STand-by)" || die "Erreur DGMGRL (NetTimeout)"
   exec_dgmgrl "edit database '$stbyDbUniqueName' set property FastStartFailoverTarget='$primDbUniqueName'" \
               "Target (Primary)" || die "Erreur DGMGRL"
   exec_dgmgrl "edit database '$primDbUniqueName' set property FastStartFailoverTarget='$stbyDbUniqueName'" \
@@ -291,42 +293,45 @@ end;
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 duplicateDBForStandBY()
 {
-  startStep "Preparation de la base"
+  LOG_TMP=$LOG_DIR/restau_${primDbName}_$DAT.log
+  if [ "$step" = "" ]
+  then
+    startStep "Preparation de la base"
 
-  tnsAliasesForDG $stbyDbUniqueName $hostStandBy  $portStandBy  $serviceStandBy  $domaineStandBy \
-                  $primDbUniqueName $hostPrimaire $portPrimaire $servicePrimaire $domainePrimaire 
+    tnsAliasesForDG $stbyDbUniqueName $hostStandBy  $portStandBy  $serviceStandBy  $domaineStandBy \
+                    $primDbUniqueName $hostPrimaire $portPrimaire $servicePrimaire $domainePrimaire 
 
-  echo "  - Recopie TNSNAMES sur autre noeud"
-  otherNode=$(srvctl status database -d $ORACLE_UNQNAME | grep -v $(hostname -s) | sed -e "s;^.*on node ;;")
-  printf "%-75s : " "    - Copie sur $otherNode"
-  scp -o StrictHostKeyChecking=no $TNS_ADMIN/tnsnames.ora ${otherNode}:$TNS_ADMIN \
-    && echo "Ok" \
-    || die "Impossible de copie le TNSNAMES sur $otherNode"
-  endStep
+    echo "  - Recopie TNSNAMES sur autre noeud"
+    otherNode=$(srvctl status database -d $ORACLE_UNQNAME | grep -v $(hostname -s) | sed -e "s;^.*on node ;;")
+    printf "%-75s : " "    - Copie sur $otherNode"
+    scp -o StrictHostKeyChecking=no $TNS_ADMIN/tnsnames.ora ${otherNode}:$TNS_ADMIN \
+      && echo "Ok" \
+      || die "Impossible de copie le TNSNAMES sur $otherNode"
+    endStep
 
-  startStep "Duplication de la base de donnees"
-  echo
-  exec_srvctl "start database -d $stbyDbUniqueName -o nomount" \
+    startStep "Duplication de la base de donnees"
+    echo
+    exec_srvctl "start database -d $stbyDbUniqueName -o nomount" \
               "    - Lancement en NO MOUNT pour restauration du control file" \
               "Ok" "Erreur" "Impossible de lancer en NOMOUT"
 
-  printf "%-75s : " "      - Restoration du control file"
-  rman target / >$$.tmp 2>&1 <<%%
+    printf "%-75s : " "      - Restoration du control file"
+    rman target / >$$.tmp 2>&1 <<%%
 run { 
 restore standby controlfile from service '$primDbUniqueName' ; 
 }
 %%
-  [ $? -eq 0 ] && { echo OK ; rm -f $$.tmp ; } \
-               || { echo ERREUR ; cat $$.tmp ; rm -f $$.tmp ; die "Erreur de restoration du control file" ; }
+    [ $? -eq 0 ] && { echo OK ; rm -f $$.tmp ; } \
+                 || { echo ERREUR ; cat $$.tmp ; rm -f $$.tmp ; die "Erreur de restoration du control file" ; }
 #  exec_sql "/ as sysdba" "
 #    alter system set db_file_name_convert=
 #       '+DATAC1/$primDbUniqueName','+DATAC1/$stbyDbUniqueName'
 #      ,'+RECOC1/$primDbUniqueName','+RECOC1/$stbyDbUniqueName' scope=spfile ;" "      - db_file_name_convert" \
 #      || die "Impossible de positionner db_file_name_convert"
-  exec_sql "/ as sysdba" "
-    alter system reset db_file_name_convert scope=spfile ;" "      - reset db_file_name_convert" 
-  exec_sql "/ as sysdba" "
-    alter system reset log_file_name_convert scope=spfile ;" "      - reset log_file_name_convert" 
+    exec_sql "/ as sysdba" "
+      alter system reset db_file_name_convert scope=spfile ;" "      - reset db_file_name_convert" 
+    exec_sql "/ as sysdba" "
+      alter system reset log_file_name_convert scope=spfile ;" "      - reset log_file_name_convert" 
 #  exec_sql "/ as sysdba" "
 #    alter system set log_file_name_convert=
 #       '+DATAC1/$primDbUniqueName','+DATAC1/$stbyDbUniqueName'
@@ -338,42 +343,44 @@ restore standby controlfile from service '$primDbUniqueName' ;
 #      ,'+RECOC1/$primDbUniqueName','+RECOC1' scope=spfile ;" "      - log_file_name_convert" \
 #      || die "Impossible de positionner log_file_name_convert"
 
-  exec_srvctl "stop database -d $stbyDbUniqueName" \
-              "      - Arret de la base" \
-              "Ok" "Erreur" "Impossible de stopper la base"
-  echo
-  exec_srvctl "start database -d $stbyDbUniqueName -o mount" \
-              "    - Lancement en MOUNT pour restauration" \
-              "Ok" "Erreur" "Impossible de lancer en MOUNT"
+    exec_srvctl "stop database -d $stbyDbUniqueName" \
+                "      - Arret de la base" \
+                "Ok" "Erreur" "Impossible de stopper la base"
+    echo
+    exec_srvctl "start database -d $stbyDbUniqueName -o mount" \
+                "    - Lancement en MOUNT pour restauration" \
+                "Ok" "Erreur" "Impossible de lancer en MOUNT"
 
-  echo
-  LOG_TMP=$LOG_DIR/restau_${primDbName}_$DAT.log
-  echo "     Note : La restauration peut être suivie dans : "
-  echo "     $LOG_TMP"
-  printf "%-75s : " "      - Restoration de la base"
-cat >/tmp/rman1_$$.txt <<%%
+    echo
+    echo "     Note : La restauration peut être suivie dans : "
+    echo "     $LOG_TMP"
+    printf "%-75s : " "      - Restoration de la base"
+  cat >/tmp/rman1_$$.txt <<%%
 run {
 set newname for database to NEW ;
 set newname for pluggable database $listePDB to NEW ;
 $channelClause
 
-restore  database from service '$primDbUniqueName' section size $sectionSize;
+restore  database from service '$primDbUniqueName' section size $sectionSizeRESTORE;
 switch datafile all ;
 switch tempfile all ;
 }
 %%
-  rman target sys/${dbPassword} >$LOG_TMP 2>&1 </tmp/rman1_$$.txt
-  [ $? -eq 0 ] && { echo OK ; cat $LOG_TMP ; rm -f $LOG_TMP; rm -f /tmp/rman1_$$.txt ; } \
-               || { echo ERREUR ; cat $LOG_TMP  ; rm -f $LOG_TMP; die "Erreur de restauration de la base" ; rm -f /tmp/rman1_$$.txt ; }
+    rman target sys/${dbPassword} >$LOG_TMP 2>&1 </tmp/rman1_$$.txt
+    [ $? -eq 0 ] && { echo OK ; cat $LOG_TMP ; rm -f $LOG_TMP; rm -f /tmp/rman1_$$.txt ; } \
+                 || { echo ERREUR ; cat $LOG_TMP  ; rm -f $LOG_TMP; die "Erreur de restauration de la base" ; rm -f /tmp/rman1_$$.txt ; }
 
+else
+  startStep "Reprise de l'etape $step"
+fi
 
-  echo "     Note : La restauration peut être suivie dans : "
+  echo "     Note : Le recover peut être suivi dans : "
   echo "     $LOG_TMP"
   printf "%-75s : " "      - Recover de la base"
 cat >/tmp/rman2_$$.txt <<%%
 run {
 $channelClause
-recover  database from service '$primDbUniqueName' section size $sectionSize;
+recover  database from service '$primDbUniqueName' section size $sectionSizeRECOVER;
 }
 %%
   rman target sys/${dbPassword} >$LOG_TMP 2>&1 </tmp/rman2_$$.txt
@@ -1033,7 +1040,12 @@ showVars()
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 createDG()
 {
-  startRun "Creation d'une base stand-by"
+  if [ "$step" = "" ]
+  then
+    startRun "Creation d'une base stand-by"
+  else
+    startRun "Reprise de la creation d'une base stand-by ($step)"
+  fi
   showVars
 
   if [ "$opePart" = "STANDBY" ]
@@ -1102,7 +1114,15 @@ where isomf(f.name)='N'
     echo
     echo "    - Liste des PDB : $listePDB"
     echo
-    echo "    - On est sur la machine stand-by, la base ne doit pas pouvoir etre lancee"
+    if [ "$step" = "" ]
+    then
+      echo "    - On est sur la machine stand-by, la base ne doit pas pouvoir etre lancee"
+    elif [ "$step" = "RECOVER" ]
+    then
+      echo "    - Reprise RECOVER (la base doit être lancee et en mode PHYSICAL STAND-BY"
+    else
+      die "Mode Reprise inconnu : $step"
+    fi
     if [ "$(srvctl status database -d $stbyDbUniqueName | grep -i running | grep -vi "not running")" != "" ]
     then
       echo "      - La base est lancee, ... "
@@ -1114,15 +1134,16 @@ where isomf(f.name)='N'
         dbRole="NonLancee"
       fi
       echo "$dbRole"
-      if [ "$dbRole" = "PHYSICAL STANDBY" ]
+      if [ "$dbRole" = "PHYSICAL STANDBY" -a "$step" = "" ]
       then
         echo "    --> Suite de la procedure"
         endStep
         finalisationDG
-      elif [ "$dbRole" = "PRIMARY" ]
+      elif [ "$dbRole" = "PRIMARY" -a "$step" = "" ]
       then
         echo "  - La base est PRIMAIRE"
-      else
+      elif [ "$step" = "" ]
+      then
         echo "    - Arret de la base"
         srvctl stop  database -d $stbyDbUniqueName >/dev/null 2>&1
         echo "    - Essai de Relancement ...."
@@ -1182,7 +1203,7 @@ suite des operations de déroule depuis la machine stand-by.
 
     $0 -m RunOnStandBY -d $primDbUniqueName -D $stbyDbUniqueName -s $scanPrimaire
 
-    Rajouter '-i' pour que le déroulement se fasse en interactif.
+    Rajouter '-F' pour que le déroulement se fasse en interactif.
 
 ========================================================================
 "
@@ -1202,7 +1223,7 @@ suite des operations de déroule depuis la machine stand-by.
     Rajouter '-i' pour que le déroulement se fasse en interactif.
 
   "
-  elif [ "$dbRole" = "NonLancee" -a "$opePart" = "STANDBY" ]
+  elif [ \( "$dbRole" = "NonLancee" -o \( "$dbRole" = "PHYSICAL STANDBY" -a "$step" = "RECOVER" \) \) -a "$opePart" = "STANDBY" ]
   then
   if  [ "$aRelancerEnBatch" = "Y" ]
     then
@@ -1216,7 +1237,6 @@ suite des operations de déroule depuis la machine stand-by.
       echo "   $LOG_FILE"
       echo 
       echo "+===========================================================================+"
-
       #
       #     On exporte les variables afin qu'elles soient reprises dans le script
       #
@@ -1225,6 +1245,7 @@ suite des operations de déroule depuis la machine stand-by.
       export aRelancerEnBatch=N
       export dbPassword
       export stbyEnvFile
+      export maxRmanChannels
       rm -f $LOG_FILE
       nohup $0 -m RunOnStandBY -d $primDbUniqueName -D $stbyDbUniqueName -s $scanOppose >/dev/null 2>&1 &
       pid=$!
@@ -1256,7 +1277,7 @@ suite des operations de déroule depuis la machine stand-by.
       echo "+===========================================================================+"
       exit
     fi
-    cleanASMBeforeCopy $laBase FORCE
+    [ "$step" = "" ] && cleanASMBeforeCopy $laBase FORCE
     duplicateDBForStandBY
     [    -f /tmp/${primDbUniqueName}_ewallet.p12 \
       -o -f /tmp/${primDbUniqueName}_cwallet.sso \
@@ -1542,6 +1563,9 @@ Usage :
          -C           : Copie et migration d'une base (le script se relance
                         en nohup apres que les premieres verifications sont faites
                         sauf si -i est precise)
+         -r  step     : Reprise a l'etape "step"
+                        valeurs de step :
+                          - RECOVER : Recommence au recover DB (en cas de plantage)
          -R           : Supprime la base (a lancer sur machine stand-by)
          -V           : Verification de fonctionnement
          -F           : Ne relance pas le script en Nohup (Foreground)
@@ -1565,7 +1589,7 @@ SCRIPT=setUpDG.sh
 
 [ "$1" = "" ] && usage
 toShift=0
-while getopts m:d:D:s:hL:CRTVF opt
+while getopts m:d:D:s:hL:Cr:RTVF opt
 do
   case $opt in
    # --------- Source Database --------------------------------
@@ -1578,6 +1602,8 @@ do
    L)   maxRmanChannels=$OPTARG  ; toShift=$(($toShift + 2)) ;;
    # --------- Modes de fonctionnement ------------------------
    C)   mode=CREATE              ; toShift=$(($toShift + 1)) ;;
+   r)   mode=CREATE
+        step=${OPTARG^^}         ; toShift=$(($toShift + 2)) ;;
    R)   mode=DELETE              ; toShift=$(($toShift + 1)) ;;
    V)   mode=VERIFICATION        ; toShift=$(($toShift + 1)) ;;
    T)   mode=TEST                ; toShift=$(($toShift + 1)) ;;
@@ -1601,8 +1627,9 @@ else
   opePart="PRIMARY"
 fi
 
-maxRmanChannels=${maxRmanChannels:-64}
-sectionSize="32G"
+maxRmanChannels=${maxRmanChannels:-32}
+sectionSizeRESTORE="64G"
+sectionSizeRECOVER="128G"
 
 #
 #      Base de données source (Db Unique Name)
@@ -1638,6 +1665,7 @@ mode=${mode:-CREATE}                             # Par défaut Create
 aRelancerEnBatch=${aRelancerEnBatch:-Y}          # Par défaut, le script de realne en nohup après les
                                                  # vérifications (pour la copie seulement)
 
+[ "$step" != "" ] && aRelancerEnBatch=N          # LA reprise ne se fait que pour le RECOVER (rapide) on force l'interactif
 # -----------------------------------------------------------------------------
 #
 #    Constantes et variables dépendantes
