@@ -21,6 +21,9 @@ testUnit()
 
   
   checkBeforeCopy
+  getParameters      "$SRC_CONNECT_STRING" "$srcPdbName" "Source"
+  getDatafiles       "$SRC_CONNECT_STRING" "$srcPdbName" "Source"
+  getInvalidObjects  "$SRC_CONNECT_STRING" "$srcPdbName" "Source"
 
   endStep
 }
@@ -387,6 +390,8 @@ using   '//$scanAddress/$SERVICE_NAME' ;"                                       
   printf "%-75s : " "  - Existence PDB Cible ($dstPdbName)" 
   [ "$res" = "" ] && { echo "Non existante" ; dstPdbExists=N ; }  \
                   || { echo "Existante" ; dstPdbExists=Y ; }
+
+echo $SRC_CONNECT_STRING
 
   res=$(exec_sql "$SRC_CONNECT_STRING" "select 1 from cdb_pdbs where pdb_name=upper('$srcPdbName');") \
                 || die "Erreur select PDB SOurce ($res)"
