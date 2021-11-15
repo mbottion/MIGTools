@@ -24,22 +24,61 @@ create_check_config(){
 
 log_info "Checking if database config file exists"
 if [ ! -f $OCI_BKP_CONFIG_DIR/opc${1}.ora ]; then
-log_info "Configuration file for database $1 does not exist, creating it"
-cat << EOF > $OCI_BKP_CONFIG_DIR/opc${1}.ora
-OPC_HOST=$OCI_BKP_OS_URL
-OPC_WALLET='LOCATION=file:$OCI_BKP_CREDWALLET_DIR CREDENTIAL_ALIAS=alias_oci'
-OPC_CONTAINER=${OCI_BKP_BUCKET_PREFIX}${1,,}
-OPC_COMPARTMENT_ID=$OCI_BKP_COMPARTMENT_OCID
-OPC_AUTH_SCHEME=BMC
-EOF
+  die "Configuration file for database $1 does not exist,
+please copy the configuration file AND the OPC Wallet
+from the source server to the target server
+
+    HINT : The name of the parameter file can be found on the machine hosting
+           the source database ($OCI_SOURCE_DB_NAME) by running:
+
+. \$HOME/${OCI_SOURCE_DB_NAME}.env
+rman target / <<%% | grep \"OPC_PFILE=\" | sed -e \"s;^.*OPC_PFILE=;;\" -e \"s;).*$;;\"
+show all ;
+%%
+
+          Once the file name found, open it to get the OPC wallet location
+
+          1) copy the parameter file in $OCI_BKP_CONFIG_DIR/opc${OCI_SOURCE_DB_NAME}.ora
+          2) Modify the copied file to point to the local OPC Wallet (if not done, the modifcation
+             will be made autoatically next time
+             LOCAL_OPC_WALLET : $OCI_BKP_ROOT_DIR/opw_wallet/$OCI_SOURCE_DB_NAME
+          3) copy the whole content of the wallet dir to $OCI_BKP_ROOT_DIR/opc_wallet/${OCI_SOURCE_DB_NAME}
+
+
+"
+
+
+
+#log_info "Configuration file for database $1 does not exist, creating it"
+#cat << EOF > $OCI_BKP_CONFIG_DIR/opc${1}.ora
+#OPC_HOST=$OCI_BKP_OS_URL
+#OPC_WALLET='LOCATION=file:$OCI_BKP_CREDWALLET_DIR CREDENTIAL_ALIAS=alias_oci'
+#OPC_CONTAINER=${OCI_BKP_BUCKET_PREFIX}${1,,}
+#OPC_COMPARTMENT_ID=$OCI_BKP_COMPARTMENT_OCID
+#OPC_AUTH_SCHEME=BMC
+#EOF
 fi
 log_success "Database config file exists"
 
+log_info "Check value of OPC_WALLET location (should be LOCAL)"
+
+dir=$(grep "OPC_WALLET=" $OCI_BKP_CONFIG_DIR/opc${OCI_SOURCE_DB_NAME}.ora \
+       | sed -e "s;^.*LOCATION=;;" -e "s;file:;;" -e "s; .*$;;")
+
+echo "   - OPC_PFILE = $dir"
+if [ "$dir" != "$OCI_BKP_ROOT_DIR/opc_wallet/$OCI_SOURCE_DB_NAME" ]
+then
+  echo "   - Incorrect value, modifying"
+  sed -i "s;$dir;$OCI_BKP_ROOT_DIR/opc_wallet/$OCI_SOURCE_DB_NAME;" $OCI_BKP_CONFIG_DIR/opc${OCI_SOURCE_DB_NAME}.ora
+  echo "   - To   : $OCI_BKP_ROOT_DIR/opc_wallet/$OCI_SOURCE_DB_NAME"
+fi
+
+
 log_info "Checking if credential wallet exists"
-if [ -f $OCI_BKP_CREDWALLET_DIR/cwallet.sso ]; then
+if [ -f $OCI_BKP_ROOT_DIR/opc_wallet/$OCI_SOURCE_DB_NAME/cwallet.sso ]; then
 	log_success "Credential wallet exists"
 else
-	log_error "Credential wallet does not exist in $OCI_BKP_CREDWALLET_DIR"
+	die "Credential wallet does not exist in $OCI_BKP_ROOT_DIR"
 	return 1
 fi
 }
@@ -107,13 +146,14 @@ log_info "Checking or creating sqlnet.ora"
 
 echo "DB_UNIQUE_NAME=$ORACLE_UNQNAME"
 echo "TNS_ADMIN=$TNS_ADMIN"
+. $HOME/$OCI_TARGET_DB_NAME.env
+tdeDir=$(cat $TNS_ADMIN/sqlnet.ora | sed -e "/ENCRYPTION_WALLET_LOCATION/ p"       \
+                                         -e "1, /ENCRYPTION_WALLET_LOCATION/ d"    \
+                                         -e "/^ *$/,$ d"                           \
+                                   | tr '\n' ' '                                   \
+                                   |  sed -e "s;^.*DIRECTORY=;;" -e "s;).*$;;")
 
-tdeDir=$(cat $TNS_ADMIN/sqlnet.ora | sed -e "/ENCRYPTION_WALLET_LOCATION/ p" \
-                                  -e "1, /ENCRYPTION_WALLET_LOCATION/ d" \
-                                  -e "/^ *$/,$ d" \
-                            | grep METHOD_DATA \
-                            | sed -e "s;^.*DIRECTORY=;;" -e "s;);;g")
-
+[ ! -d "$tdeDir" ] && { log_error "TDE wallet dir determined as : ($tdeDir), does not exists" ; tdeDir="" ; }
 [ "$tdeDir" = "" ] && { ERR2="Unable to get TDE dir, please update $OCI_BKP_TNS_DIR/$1/sqlnet.ora" ; tdeDir="/UNKNOWN_DIR" ; }
 if [ ! -f $OCI_BKP_TNS_DIR/$1/sqlnet.ora ]; then
 cat > $OCI_BKP_TNS_DIR/$1/sqlnet.ora << EOF
