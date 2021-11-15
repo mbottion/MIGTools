@@ -4,21 +4,12 @@
 # Author : Amaury FRANCOIS <amaury.francois@oracle.com>
 # Logging added : Michel BOTTIONE
 
-customPostUpgrade()
+renamePdbs()
 {
-  # 
-  # -----------------------------------------------------------------------------------------
-  # 
-
-  startStep "Final recompilation and Materialized view re-creation"
-  
-  message "DB environment loading"
-  load_db_env $OCI_TARGET_DB_NAME
-
+  startStep "Renaming PDBS if needed"
   pdbs=$(exec_sql "/ as sysdba" "select name from v\$pdbs where name != 'PDB\$SEED';") || die "Unable to get PDBS list $pdbs"
   for pdb in $pdbs
   do
-    message "Custom upgrade tasks for $pdb"
     if echo $REMAP_PDBS | grep "${pdb}>" > /dev/null
     then
       remap=$(echo ${REMAP_PDBS^^} | sed -e "s;^.*${pdb}>;${pdb}>;")
@@ -36,6 +27,7 @@ set feed on heading on
 prompt Close $old and open restricted
 alter pluggable database $old close immediate instances=all ;
 alter pluggable database $old open restricted ;
+alter session set container=$old ;
 
 prompt Rename
 alter pluggable database $old rename global_name to $new ;
@@ -48,6 +40,24 @@ alter pluggable database $new save state ;" || die "Error when renaming the $old
       log_success "$old Renamed to $new"
       pdb=$new
     fi
+  done
+  endStep
+}
+customPostUpgrade()
+{
+  # 
+  # -----------------------------------------------------------------------------------------
+  # 
+
+  startStep "Final recompilation and Materialized view re-creation"
+  
+  message "DB environment loading"
+  load_db_env $OCI_TARGET_DB_NAME
+
+  pdbs=$(exec_sql "/ as sysdba" "select name from v\$pdbs where name != 'PDB\$SEED';") || die "Unable to get PDBS list $pdbs"
+  for pdb in $pdbs
+  do
+    message "Custom upgrade tasks for $pdb"
     
     recompEtVuesMat $pdb
     getInvalidObjects  "/ as sysdba" "$pdb"
@@ -373,11 +383,13 @@ fi
 message "Credentials in wallet verification" 
 check_cred $OCI_TARGET_DB_NAME
 if [ $? -ne 0 ]; then
-        log_error "Error when checking credentials presence in wallet for this database. Exiting." 
-        die "Please create credentials for target sys user:
+        die " Error when checking credentials presence in wallet for this database. Exiting.
 
 Command :
 -------
+
+  HINT : After running the command enter the SYS password
+         of the target DB ($OCI_TARGET_DB_NAME), twice.
 
 mkstore -wrl $OCI_BKP_CREDWALLET_DIR -createCredential $OCI_TARGET_DB_NAME sys
 
@@ -397,8 +409,8 @@ echo "To check :
       - TDE Configuration
      "
 
-srvctl stop database -d $ORACLE_UNQNAME
-exec_sql "/ as sysdba" "Shutdown abort ; " "Force Shutdown"
+#srvctl stop database -d $ORACLE_UNQNAME
+#exec_sql "/ as sysdba" "Shutdown abort ; " "Force Shutdown"
 TEMP_PFILE=$(mktemp)
 rman target /  << EOF | tee /tmp/$$.log
 set echo on;
@@ -421,33 +433,74 @@ then
   echo "TNS_ADMIN=$TNS_ADMIN"
   echo ""
 
-  if grep "unable to open Oracle Database Backup Service" /tmp/$$.log >/dev/null
+  if grep "unable to open Oracle Database Backup Service" /tmp/$$.log >/dev/null || grep OPC_WALLET /tmp/$$.log >/dev/null
   then
     echo "There is a problem with OPC backups configuration"
-    echo "   - Check /$OCI_BKP_CONFIG_DIR/opc${OCI_SOURCE_DB_NAME}.ora"
+    echo "   - Check $OCI_BKP_CONFIG_DIR/opc${OCI_SOURCE_DB_NAME}.ora"
     echo "   - Ensure that the Source OPC Wallet has been copied into $OCI_BKP_ROOT_DIR/opc_wallet/${OCI_SOURCE_DB_NAME}" 
+    echo "
+
+    HINT : The name of the parameter file can be found on the machine hosting
+           the source database ($OCI_SOURCE_DB_NAME) by running:
+
+. \$HOME/${OCI_SOURCE_DB_NAME}.env
+rman target / <<%% | grep \"OPC_PFILE=\" | sed -e \"s;^.*OPC_PFILE=;;\" -e \"s;).*$;;\"
+show all ;
+%%
+    
+          Once the file name found, open it to get the OPC wallet location
+
+          1) copy the parameter file in $OCI_BKP_CONFIG_DIR/opc${OCI_SOURCE_DB_NAME}.ora
+          2) copy the whole content of the wallet dir to $OCI_BKP_ROOT_DIR/opc_wallet/${OCI_SOURCE_DB_NAME}
+         "
   fi
 
   if grep "ORA-28759 occurred during wallet operation" /tmp/$$.log > /dev/null
   then
     echo "There is a problem reading OPC backups"
-    echo "   - OPC Wallet has not been copied into $OCI_BKP_ROOT_DIR/opc_wallet/${OCI_SOURCE_DB_NAME}" 
+    echo "   - OPC Wallet has not been copied into $OCI_BKP_ROOT_DIR/opc_wallet/${OCI_SOURCE_DB_NAME}
+
+    HINT : remove $OCI_BKP_CONFIG_DIR/opc${OCI_SOURCE_DB_NAME}.ora, run the command again
+           and follow the hints
+" 
   fi
 
   if grep "HTTP response error" /tmp/$$.log > /dev/null
   then
    echo "Unable to access the backup bucket"
-   echo "   - Check /$OCI_BKP_CONFIG_DIR/opc${OCI_SOURCE_DB_NAME}.ora"
+   echo "   - Check /$OCI_BKP_CONFIG_DIR/opc${OCI_SOURCE_DB_NAME}.ora
+
+    HINT : remove $OCI_BKP_CONFIG_DIR/opc${OCI_SOURCE_DB_NAME}.ora, run the command again
+           and follow the hints
+"
   fi
 
   if grep "unable to decrypt backup" /tmp/$$.log > /dev/null
   then
     echo "Unable du decrypt the backup"
-    echo "   - Has the the wallet been copied fron the source DB to the target DB§?"
+    echo
+    echo "   - Has the the wallet been copied from the source DB to the target DB?"
+    echo
     echo "   - Target DB TDE configuration : "
+    . $HOME/$OCI_TARGET_DB_NAME.env
     cat $TNS_ADMIN/sqlnet.ora | sed -e "/ENCRYPTION_WALLET_LOCATION/ p" \
                                     -e "1, /ENCRYPTION_WALLET_LOCATION/ d" \
                                     -e "/^ *$/,$ d" 
+
+    echo "
+
+    HINT : On the machine hosting the source DB (${OCI_SOURCE_DB_NAME}), execute
+
+. \$HOME/${OCI_SOURCE_DB_NAME}.env
+cat \$TNS_ADMIN/sqlnet.ora | sed -e \"/ENCRYPTION_WALLET_LOCATION/ p\"        \\
+                                 -e \"1, /ENCRYPTION_WALLET_LOCATION/ d\"     \\
+                                 -e \"/^ *\$/,\$ d\"                          \\
+                          | tr '\n' ' '                                       \\
+                          | sed -e \"s;^.*DIRECTORY=;;\" -e \"s;).*$;;\" ;  echo   
+        
+           This command should give the TDE Wallet folder, copy the whole content
+           of this folder to the local wallet folder shown above
+   "
   fi
 
   echo
@@ -562,6 +615,15 @@ echo "*.inmemory_size=1g" >> $TEMP_PFILE
 for p in  $CLUSTER_INTERCONNECT_PARAMS ; do
 echo $p >> $TEMP_PFILE
 done
+
+log_info "Align DB_DOMAIN"
+
+echo "   - Domain (srvctl) : $SAVED_DOMAIN"
+if [ "$SAVED_DOMAIN" != "" ]
+then
+  echo "db_domain=$SAVED_DOMAIN" >> $TEMP_PFILE
+  srvctl modify database -d $OCI_BKP_DB_UNIQUE_NAME -domain $SAVED_DOMAIN || die "Unable to set DB DOMAIN"
+fi
 
 log_info "Get audit_file_dest and create directory if needed"
 audit_dir=$(grep audit_file_dest $TEMP_PFILE | cut -f2 -d= | sed -e "s;';;g")
@@ -861,11 +923,17 @@ usage()
 
   Duplicate a database from a backup with upgrade if needed
 
-  After a few verifications, the scrip will automatically re-launch itself in the background an 
+  After a few verifications, the script will automatically re-launch itself in the background an 
   run unattended
 
   The first steps will guide you on configuration steps (copying the config files and wallets from
   the source.
+
+  If the duplicated database is not in the same version than the target CDB, an 
+  upgrade will be launched. As part of the upgrade, you can modify the customPostUpgrade()
+  function in the script to perform specific actions.
+
+  The -M parameter allows you to rename all or some PDBs once they have been duplicated.
 
   Parameters :
 
@@ -874,7 +942,7 @@ usage()
     -t time          : Point in time to recover
     -i id            : DB Id of the source
     -p degree        : Restore parallelism
-    -M NamesMap      : PDBs rename map : "OLD1>NEW1;OLD2>NEW2;..."
+    -M NamesMap      : PDBs rename map : \"OLD1>NEW1;OLD2>NEW2;...\"
     -n               : Don't ask questions
     -F               : Remain foreground
 
@@ -921,19 +989,28 @@ set -o pipefail
 {
   startRun "Database duplication from $OCI_SOURCE_DB_NAME to $OCI_TARGET_DB_NAME at $OCI_BKP_DATE"
 
+  #
+  #     The configured domain is sometimes lost on failed executions
+  # we save it to reposition it later
+  #
+  . $HOME/$OCI_TARGET_DB_NAME.env || die "unable to set target env" 
+  if [ "$SAVED_DOMAIN" = "" ]
+  then
+   export SAVED_DOMAIN=$(srvctl config database -d $ORACLE_UNQNAME  | grep -i domain | cut -f2 -d: | sed -e "s; ;;g")
+  fi
+
    echo "
 Parameters :
 ==========
 
     - Source DATABASE    : $OCI_SOURCE_DB_NAME
     - Target DATABASE    : $OCI_TARGET_DB_NAME
+    - Target DB DOMAIN   : $SAVED_DOMAIN
     - Source DBID        : $OCI_DBID
     - Parallel           : $OCI_RMAN_PARALLELISM
     - PITR Date          : $OCI_BKP_DATE
     - PDBs renaming      : $REMAP_PDBS
    "
-
-
 #  
 #    Verify environment and try o get the spfile from backups, if this 
 # step terminates sucessfully, the only know reason for the restore to fail is 
@@ -1000,7 +1077,6 @@ Parameters :
   dropDatabase
   endStep
 
-
   startStep "SPFILE restore"
 
   spFileRestore || die "Error restoring the SPFILE
@@ -1017,7 +1093,6 @@ Parameters :
                                   -e "/^ *$/,$ d")
 "
   endStep
-
 
   startStep "Restore the controlfile"
   controlFileRestore  || die "Control file not restored, aborting"
@@ -1050,6 +1125,7 @@ Parameters :
   postRestore
   endStep
 
+  renamePdbs
 #
 #   Custom tasks, depending on the application, put all non standard stuff in the 
 # customPostUpgrade function
