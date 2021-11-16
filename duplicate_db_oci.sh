@@ -738,7 +738,21 @@ SWITCH_TEMPFILE_CLAUSE=$(exec_sql "/ as sysdba" "
 set feed off head off lines 200 pages 300
 select 'set newname for tempfile '||file#||' to new;' from v\$tempfile;")
 
+cat <<%%
+run {
+set until time "to_date('$OCI_BKP_DATE', 'yyyy-mm-dd_hh24:mi:ss')";
+set newname for database to new;
+$SWITCH_TEMPFILE_CLAUSE
+restore database;
+switch datafile all;
+switch tempfile all;
+recover database delete archivelog;
+CONFIGURE SNAPSHOT CONTROLFILE NAME TO '+RECOC1/$OCI_BKP_DB_UNIQUE_NAME/snapcf_${OCI_TARGET_DB_NAME}.f';
+}
+%%
+
 message "Database restore and recover"
+#rman debug=all trace=/tmp/rman.trc target /@$OCI_TARGET_DB_NAME << EOF
 rman target /@$OCI_TARGET_DB_NAME << EOF
 CONFIGURE CONTROLFILE AUTOBACKUP OFF;
 run {
@@ -781,6 +795,10 @@ fi
 
 postRestore()
 {
+if [ "$1" = "Y" ]
+then
+  sed -i "s;OPEN RESETLOGS;OPEN RESETLOGS UPGRADE;" ${TRACE_CTL_FILE}
+fi
 log_info "Stopping the database"
 srvctl stop database -d $OCI_BKP_DB_UNIQUE_NAME
 
@@ -791,18 +809,20 @@ log_info "Setting environment using env file"
 . ~/${OCI_TARGET_DB_NAME}.env
 
 log_info "Recreating the control file"
-exec_sql "/ as sysdba" "@${TRACE_CTL_FILE}" "Run ${TRACE_CTL_FILE}"
+exec_sql "/ as sysdba" "@${TRACE_CTL_FILE}" "Run ${TRACE_CTL_FILE} UPGRADE=$1"
 
 log_info "Checking database state"
 DB_STATE=$(exec_sql "/ as sysdba" "select status from gv\$instance;")
 
+if false 
+then
 if [[ $DB_STATE =~ "OPEN" ]]; then
         log_success "Database started in OPEN mode "
 else
         log_error "Unable to restart the database in OPEN mode. Exiting"
         exit 1
 fi
-
+fi
 rm ${TRACE_CTL_FILE}
 
 log_info "Stopping the database"
@@ -818,7 +838,8 @@ exec_sql "/ as sysdba" "startup mount exclusive;" "DB exclusive"
 log_info "Changing the db name using nid"
 $OCI_SCRIPT_DIR/change_db_name.exp $ORACLE_HOME $OCI_TARGET_DB_NAME
 
-
+if false
+then
 log_info "Restarting the database in open reset logs"
 
 exec_sql -no_error "/ as sysdba" "
@@ -875,7 +896,7 @@ else
         log_error "Problem when duplicating the database. Exiting."
         exit 1
 fi
-
+fi
 }
 
 needsUpgrade()
@@ -954,7 +975,7 @@ usage()
 ############################################
 
 OCI_SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
-OCI_SCRIPT_DIR=/admindb/dupdb/backup_oci/scripts
+#OCI_SCRIPT_DIR=/admindb/dupdb/backup_oci/scripts
 . $OCI_SCRIPT_DIR/utils.sh
 PROMPT=true
 GO_BACKGROUND=Y
@@ -1116,14 +1137,18 @@ Parameters :
   UPGRADED=N
   if needsUpgrade
   then
+    startStep "Post-restore Tasks"
+    postRestore Y
+    endStep
     startStep "Upgrade the database"
     upgradeDB
     UPGRADED=Y
     endStep
+  else
+    startStep "Post-restore Tasks"
+    postRestore N
+    endStep
   fi
-  startStep "Post-restore Tasks"
-  postRestore
-  endStep
 
   renamePdbs
 #
