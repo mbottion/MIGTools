@@ -16,7 +16,7 @@ OCI_BKP_LIB=$OCI_BKP_ROOT_DIR/lib/libopc.so
 OCI_BKP_CONFIG_DIR=$OCI_BKP_ROOT_DIR/config
 OCI_BKP_CREDWALLET_DIR=$OCI_BKP_ROOT_DIR/cred_wallet
 OCI_BKP_TNS_DIR=$OCI_BKP_ROOT_DIR/tns
-OCI_BKP_LOG_DIR=/admindb/work/dupdb/logs
+OCI_BKP_LOG_DIR=$OCI_BKP_ROOT_DIR/logs
 
 
 #Functions
@@ -27,23 +27,39 @@ if [ ! -f $OCI_BKP_CONFIG_DIR/opc${1}.ora ]; then
   die "Configuration file for database $1 does not exist,
 please copy the configuration file AND the OPC Wallet
 from the source server to the target server
-
     HINT : The name of the parameter file can be found on the machine hosting
            the source database ($OCI_SOURCE_DB_NAME) by running:
+===================================================================================
 
 . \$HOME/${OCI_SOURCE_DB_NAME}.env
-rman target / <<%% | grep \"OPC_PFILE=\" | sed -e \"s;^.*OPC_PFILE=;;\" -e \"s;).*$;;\"
+f=\$(rman target / <<%% | grep \"OPC_PFILE=\" | sed -e \"s;^.*OPC_PFILE=;;\" -e \"s;).*$;;\"
 show all ;
 %%
+) ;\\
+echo -n \"Source config file : \$f\" ; test -f \$f && echo \" OK\" || echo \" NOT exists\" ;\\
+wd=\$(grep OPC_WALLET \$f | sed -e \"s;^.*LOCATION=file:;;\" | cut -f1 -d\" \") ; \\
+echo -n \"WALLET Dir         : \$wd\" ; test -d \$wd && echo \" OK\" || echo \" NOT exists\" ;\\
+echo ; \\
+echo \"Tar command (exemple) : 
+ cd \$wd && tar cvzf /tmp/opc_$OCI_SOURCE_DB_NAME.tgz * -C \$(dirname \$f) \$(basename \$f) ; cd - \";\\
+echo ; \\
+echo \"copy the tar file on the source and place files in the required folders\" 
 
-          Once the file name found, open it to get the OPC wallet location
+===================================================================================
 
+   Once the file name found, open it to get the OPC wallet location
           1) copy the parameter file in $OCI_BKP_CONFIG_DIR/opc${OCI_SOURCE_DB_NAME}.ora
           2) Modify the copied file to point to the local OPC Wallet (if not done, the modifcation
              will be made autoatically next time
-             LOCAL_OPC_WALLET : $OCI_BKP_ROOT_DIR/opw_wallet/$OCI_SOURCE_DB_NAME
+             LOCAL_OPC_WALLET : $OCI_BKP_ROOT_DIR/opc_wallet/$OCI_SOURCE_DB_NAME
           3) copy the whole content of the wallet dir to $OCI_BKP_ROOT_DIR/opc_wallet/${OCI_SOURCE_DB_NAME}
-
+             ie : 
+          
+   mkdir -p $OCI_BKP_ROOT_DIR/opc_wallet/${OCI_SOURCE_DB_NAME}
+   cd $OCI_BKP_ROOT_DIR/opc_wallet/${OCI_SOURCE_DB_NAME}
+   tar xvzf /tmp/opc_$OCI_SOURCE_DB_NAME.tgz
+   mv opc${OCI_SOURCE_DB_NAME}.ora $OCI_BKP_CONFIG_DIR/opc${OCI_SOURCE_DB_NAME}.ora
+   cd -
 
 "
 
