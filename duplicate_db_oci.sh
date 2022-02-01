@@ -116,29 +116,27 @@ init()
     log_error "Error when getting the local SCAN address. Exiting." 
     die "Please check $OCI_TARGET_DB_NAME scan configuration"
   fi
-  if [ "$RESTART_POST_UPGRADE" = "N" ]
+  #Checking if configuration exists, if not creating it
+  message "OCI Backup Configuration" 
+  create_check_config $OCI_SOURCE_DB_NAME
+  if [ $? -ne 0 ]; then
+    log_error "Error when checking or creating configuration file . Exiting." 
+    die "Unable to create $OCI_BKP_CONFIG_DIR/opc${OCI_SOURCE_DB_NAME}.ora"
+  fi
+  if [ "$(grep OPC_HOST $OCI_BKP_CONFIG_DIR/opc${OCI_SOURCE_DB_NAME}.ora  | cut -f1 -d"=")" = "" ]
   then
-    #Checking if configuration exists, if not creating it
-    message "OCI Backup Configuration" 
-    create_check_config $OCI_SOURCE_DB_NAME
-    if [ $? -ne 0 ]; then
-      log_error "Error when checking or creating configuration file . Exiting." 
-      die "Unable to create $OCI_BKP_CONFIG_DIR/opc${OCI_SOURCE_DB_NAME}.ora"
-    fi
-    if [ "$(grep OPC_HOST $OCI_BKP_CONFIG_DIR/opc${OCI_SOURCE_DB_NAME}.ora  | cut -f1 -d"=")" = "" ]
-    then
-      log_error "Incomplete backup configuration"
-      die "Please edit the $OCI_BKP_CONFIG_DIR/opc${OCI_SOURCE_DB_NAME}.ora file to point to $OCI_SOURCE_DB_NAME backups"
-    fi
+    log_error "Incomplete backup configuration"
+    die "Please edit the $OCI_BKP_CONFIG_DIR/opc${OCI_SOURCE_DB_NAME}.ora file to point to $OCI_SOURCE_DB_NAME backups"
+  fi
 
-    log_success "OPC Backups configuration checked"
+  log_success "OPC Backups configuration checked"
 
 
-    #Check if credentials are presents for this database
-    message "Credentials in wallet verification" 
-    check_cred $OCI_TARGET_DB_NAME
-    if [ $? -ne 0 ]; then
-      die " Error when checking credentials presence in wallet for this database. Exiting.
+  #Check if credentials are presents for this database
+  message "Credentials in wallet verification" 
+  check_cred $OCI_TARGET_DB_NAME
+  if [ $? -ne 0 ]; then
+    die " Error when checking credentials presence in wallet for this database. Exiting.
 
 Command :
 -------
@@ -149,63 +147,70 @@ Command :
 mkstore -wrl $OCI_BKP_CREDWALLET_DIR -createCredential $OCI_TARGET_DB_NAME sys
 
 "
-    fi
-    #Checking and creating TNS conf
-    message "TNS and wallet configuration" 
-    create_check_tns $OCI_TARGET_DB_NAME
-    if [ $? -ne 0 ]; then
-      log_error "Error when checking or creating TNS configuration. Exiting." 
-      die "Abort"
-    fi
+  fi
+  #Checking and creating TNS conf
+  message "TNS and wallet configuration" 
+  create_check_tns $OCI_TARGET_DB_NAME
+  if [ $? -ne 0 ]; then
+    log_error "Error when checking or creating TNS configuration. Exiting." 
+    die "Abort"
+  fi
 
-    message "Check that the database is NOT running"
-    if [ "$(srvctl status database -d $OCI_BKP_DB_UNIQUE_NAME | grep -i running  | grep -vi "not running")" != "" ]
-    then
-      log_info "  - Shutting down tha database (abort)"
-      srvctl stop database -d $OCI_BKP_DB_UNIQUE_NAME -o abort && log_success "Database stopped" || log_error "Unable to stop the database"
-    fi
+  message "Check that the database is NOT running"
+  if [ "$(srvctl status database -d $OCI_BKP_DB_UNIQUE_NAME | grep -i running  | grep -vi "not running")" != "" ]
+  then
+    log_info "  - Shutting down the database (abort)"
+    srvctl stop database -d $OCI_BKP_DB_UNIQUE_NAME -o abort && log_success "Database stopped" || log_error "Unable to stop the database"
+  fi
 
-    message "Basic RMAN Check (restore the spfile to fake location)"
-    echo "To check : 
+  . $HOME/$OCI_TARGET_DB_NAME.env || die "Unable to set the environment for $OCI_TARGET_DB_NAME"
+
+  message "Basic RMAN Check (restore the spfile to fake location)"
+  echo "To check : 
+
+  ORACLE_HOME=$ORACLE_HOME
+  SID=$ORACLE_SID
+  UNQNAME=$ORACLE_UNQNAME
+
       - OPC Configuration
       - TDE Configuration
      "
 
-    TEMP_PFILE=$(mktemp)
-    rman target /  << EOF | tee /tmp/$$.log
-set echo on;
-startup nomount;
+  TEMP_PFILE=$(mktemp)
+  rman target /  << EOF | tee /tmp/$$.log
+set echo on
+startup nomount ;
 set DBID=$OCI_DBID
 RUN {
 ALLOCATE CHANNEL ch1 DEVICE TYPE sbt PARMS 'SBT_LIBRARY=$OCI_BKP_LIB, ENV=(OPC_PFILE=/$OCI_BKP_CONFIG_DIR/opc${OCI_SOURCE_DB_NAME}.ora)';
 RESTORE SPFILE TO PFILE '$TEMP_PFILE' FROM AUTOBACKUP ;
 }
 EOF
-    status=$?
-    rm -f $TEMP_FILE
-    if [ $status -ne 0 ]
-    then
-      echo ""
-      echo "==================================================="
-      echo "An error occured, trying to find the root cause ..."
-      echo "==================================================="
-      echo "TNS_ADMIN=$TNS_ADMIN"
-      echo ""
+  status=$?
+  rm -f $TEMP_FILE
+  if [ $status -ne 0 ]
+  then
+    echo ""
+    echo "==================================================="
+    echo "An error occured, trying to find the root cause ..."
+    echo "==================================================="
+    echo "TNS_ADMIN=$TNS_ADMIN"
+    echo ""
 
-      if grep "cannot use command when connected to a mounted" /tmp/$$.log >/dev/null
-      then
-        echo "Target database is mounted, please stop it :
+    if grep "cannot use command when connected to a mounted" /tmp/$$.log >/dev/null
+    then
+      echo "Target database is mounted, please stop it :
       
     srvctl stop database -d $OCI_BKP_DB_UNIQUE_NAME
     
       "
-      fi
-      if grep "no AUTOBACKUP found" /tmp/$$.log >/dev/null
-      then
-        echo "Ensure that the provided DBID ($OCI_DBID) is correct"
-        echo "   - If the source database still exists, run the folowing"
-        echo "     commands on the source server"
-        echo "
+    fi
+    if grep "no AUTOBACKUP found" /tmp/$$.log >/dev/null
+    then
+      echo "Ensure that the provided DBID ($OCI_DBID) is correct"
+      echo "   - If the source database still exists, run the folowing"
+      echo "     commands on the source server"
+      echo "
 ===================================================================================
 
 . \$HOME/${OCI_SOURCE_DB_NAME}.env
@@ -216,14 +221,14 @@ select 'Db Name : ' || name || ' DBID --> ' || dbid from v\\\$database ;
 ===================================================================================
 
       "
-      fi
+    fi
     
-      if grep "unable to open Oracle Database Backup Service" /tmp/$$.log >/dev/null || grep OPC_WALLET /tmp/$$.log >/dev/null
-      then
-        echo "There is a problem with OPC backups configuration"
-        echo "   - Check $OCI_BKP_CONFIG_DIR/opc${OCI_SOURCE_DB_NAME}.ora"
-        echo "   - Ensure that the Source OPC Wallet has been copied into $OCI_BKP_ROOT_DIR/opc_wallet/${OCI_SOURCE_DB_NAME}" 
-        echo "
+    if grep "unable to open Oracle Database Backup Service" /tmp/$$.log >/dev/null || grep OPC_WALLET /tmp/$$.log >/dev/null
+    then
+      echo "There is a problem with OPC backups configuration"
+      echo "   - Check $OCI_BKP_CONFIG_DIR/opc${OCI_SOURCE_DB_NAME}.ora"
+      echo "   - Ensure that the Source OPC Wallet has been copied into $OCI_BKP_ROOT_DIR/opc_wallet/${OCI_SOURCE_DB_NAME}" 
+      echo "
 
     HINT : The name of the parameter file can be found on the machine hosting
            the source database ($OCI_SOURCE_DB_NAME) by running:
@@ -238,42 +243,42 @@ show all ;
           1) copy the parameter file in $OCI_BKP_CONFIG_DIR/opc${OCI_SOURCE_DB_NAME}.ora
           2) copy the whole content of the wallet dir to $OCI_BKP_ROOT_DIR/opc_wallet/${OCI_SOURCE_DB_NAME}
          "
-      fi
+    fi
 
-      if grep "ORA-28759 occurred during wallet operation" /tmp/$$.log > /dev/null
-      then
-        echo "There is a problem reading OPC backups"
-        echo "   - OPC Wallet has not been copied into $OCI_BKP_ROOT_DIR/opc_wallet/${OCI_SOURCE_DB_NAME}
+    if grep "ORA-28759 occurred during wallet operation" /tmp/$$.log > /dev/null
+    then
+      echo "There is a problem reading OPC backups"
+      echo "   - OPC Wallet has not been copied into $OCI_BKP_ROOT_DIR/opc_wallet/${OCI_SOURCE_DB_NAME}
 
     HINT : remove $OCI_BKP_CONFIG_DIR/opc${OCI_SOURCE_DB_NAME}.ora, run the command again
            and follow the hints
 " 
-      fi
+    fi
 
-      if grep "HTTP response error" /tmp/$$.log > /dev/null
+    if grep "HTTP response error" /tmp/$$.log > /dev/null
       then
-        echo "Unable to access the backup bucket"
-        echo "   - Check /$OCI_BKP_CONFIG_DIR/opc${OCI_SOURCE_DB_NAME}.ora
+      echo "Unable to access the backup bucket"
+      echo "   - Check /$OCI_BKP_CONFIG_DIR/opc${OCI_SOURCE_DB_NAME}.ora
 
     HINT : remove $OCI_BKP_CONFIG_DIR/opc${OCI_SOURCE_DB_NAME}.ora, run the command again
            and follow the hints
 "
-      fi
+    fi
 
-      if grep "unable to decrypt backup" /tmp/$$.log > /dev/null
-      then
-        echo "Unable du decrypt the backup"
-        echo
-        echo "   - Has the the wallet been copied from the source DB to the target DB?"
-        echo
-        echo "   - Target DB TDE configuration : "
-        . $HOME/$OCI_TARGET_DB_NAME.env
-        ld=$(cat $TNS_ADMIN/sqlnet.ora | sed -e "/ENCRYPTION_WALLET_LOCATION/ p" \
-                                      -e "1, /ENCRYPTION_WALLET_LOCATION/ d" \
-                                      -e "/^ *$/,$ d" \
-                            | tr -d '\n' | sed -e "s;^[^/]*;;" -e "s;).*$;;")
-        echo "Local TDE dir : $ld"
-        echo "
+    if grep "unable to decrypt backup" /tmp/$$.log > /dev/null
+    then
+      echo "Unable du decrypt the backup"
+      echo
+      echo "   - Has the the wallet been copied from the source DB to the target DB?"
+      echo
+      echo "   - Target DB TDE configuration : "
+      . $HOME/$OCI_TARGET_DB_NAME.env
+      ld=$(cat $TNS_ADMIN/sqlnet.ora | sed -e "/ENCRYPTION_WALLET_LOCATION/ p" \
+                                    -e "1, /ENCRYPTION_WALLET_LOCATION/ d" \
+                                    -e "/^ *$/,$ d" \
+                          | tr -d '\n' | sed -e "s;^[^/]*;;" -e "s;).*$;;")
+      echo "Local TDE ir : $ld"
+      echo "
 
     HINT : On the machine hosting the source DB (${OCI_SOURCE_DB_NAME}), execute
            (if the source DB is still available)
@@ -300,47 +305,47 @@ echo \"copy the tar file on the source and place files in the required folders\"
    cd -
    
    "
-      fi
-
-      echo
-      rm -f /tmp/$$.log
-      log_error "ERROR when checking RMAN"
-      die "Check TDE and RMAN"
     fi
-    log_success "RMAN and TDE configuration checked"
 
+    echo
     rm -f /tmp/$$.log
-    message "Check RMAN SQL*net connectivity"
+    log_error "ERROR when checking RMAN"
+    die "Check TDE and RMAN"
+  fi
+  log_success "RMAN and TDE configuration checked"
 
-    TEMP_PFILE=$(mktemp)
-    rman target /@$OCI_TARGET_DB_NAME << EOF | tee /tmp/$$.log
+  rm -f /tmp/$$.log
+  message "Check RMAN SQL*net connectivity"
+  load_db_env $OCI_TARGET_DB_NAME
+
+  TEMP_PFILE=$(mktemp)
+  rman target /@$OCI_TARGET_DB_NAME << EOF | tee /tmp/$$.log
 select * from dual ;
 EOF
-    status=$?
-    rm -f $TEMP_FILE
-    sn=$(exec_sql "/ as sysdba" "select value from v\$parameter where name = 'service_names';")
-    if [ $status -ne 0 -a "$(grep "TNS:listener: all appropriate instances are blocking new connections" /tmp/$$.log)" = "" \
-                       -a "$sn" != "DUMMY" ]
-    then
-      echo ""
-      echo "==================================================="
-      echo "An error occured, trying to find the root cause ..."
-      echo "==================================================="
-      echo "TNS_ADMIN=$TNS_ADMIN"
-      echo "service_names=$sn"
-      echo "
+  status=$?
+  rm -f $TEMP_FILE
+  sn=$(exec_sql "/ as sysdba" "select value from v\$parameter where name = 'service_names';")
+  if [ $status -ne 0 -a "$(grep "TNS:listener: all appropriate instances are blocking new connections" /tmp/$$.log)" = "" \
+                     -a "$sn" != "DUMMY" ]
+  then
+    echo ""
+    echo "==================================================="
+    echo "An error occured, trying to find the root cause ..."
+    echo "==================================================="
+    echo "TNS_ADMIN=$TNS_ADMIN"
+    echo "service_names=$sn"
+    echo "
     
         RMAN was not able to connect to the database, check
     that database name, host name, port and service name are correct in 
     $TNS_ADMIN/tnsnames.ora
     "
    
-      die "RMAN is not able to connect to the database"
-    fi  
-    log_success "RMAN may be able to connect to the database"
-    exec_sql "/ as sysdba" "Shutdown immediate ; " "Shutdown" || exec_sql "/ as sysdba" "Shutdown abort" "Force shutdown"
-    message "We can go background if required now ...."
-  fi
+    die "RMAN is not able to connect to the database"
+  fi  
+  log_success "RMAN may be able to connect to the database"
+  exec_sql "/ as sysdba" "Shutdown immediate ; " "Shutdown" || exec_sql "/ as sysdba" "Shutdown abort" "Force shutdown"
+  message "We can go background if required now ...."
   return 0
 }
 
@@ -416,7 +421,8 @@ ALLOCATE CHANNEL ch1 DEVICE TYPE sbt PARMS 'SBT_LIBRARY=$OCI_BKP_LIB, ENV=(OPC_P
 RESTORE SPFILE TO PFILE '$TEMP_PFILE' FROM AUTOBACKUP ;
 }
 EOF
-  [ $? -ne 0 ] && { log_error "SPFILE Restoration error" ; return 1 ; }
+  status=$?
+  [ $status -ne 0 ] && { log_error "SPFILE Restoration error" ; return 1 ; }
 
   log_info "Stopping database"
 
@@ -737,6 +743,8 @@ END;
 # =========================================================================================
 postRestore_ChangeDBName()
 {
+  log_info "Stopping database"
+  srvctl stop database -d $OCI_BKP_DB_UNIQUE_NAME
   log_info "Starting in mount exclusive"
   exec_sql "/ as sysdba" "startup mount exclusive;" "DB exclusive" || die "Unable to mount in exclusive mode"
 
@@ -865,7 +873,6 @@ postRestore()
 # =========================================================================================
 needsUpgrade()
 {
-  [ "$RESTART_POST_UPGRADE" = "Y" ] && return 0
   echo
   echo "Check if database needs to be upgraded (based on compatible parameter)"
   echo
@@ -895,18 +902,13 @@ upgradeDB()
   exec_sql "/ as sysdba" "startup upgrade" || die "Unable to start in upgrade mode"
   message "Upgrading ...."
   dbupgrade
-  if [ $? -ne 0 ]
-  then
-    die "DATABASE upgrade failed, you can perform the upgrade manually and restart the 
-script again, in that case, just add the  -R option to the command line"
-  fi
 }
 
 usage()
 {
   echo " Usage : $(basename $0) -s <DB_NAME of source> -d <DB_NAME of target> 
                                 -t <2019-12-25_13:31:40> -i <DBID of source> 
-                                -M \"pdb name mappigs\" -R
+                                -M \"pdb name mappigs\"
                                 [-p n] [-n(oprompt)] [-F(oreground)]
 
   Version : $VERSION
@@ -933,7 +935,6 @@ usage()
     -i id            : DB Id of the source
     -p degree        : Restore parallelism
     -M NamesMap      : PDBs rename map : \"OLD1>NEW1;OLD2>NEW2;...\"
-    -R               : Restart the processing after a manual upgrade
     -n               : Don't ask questions
     -F               : Remain foreground
 
@@ -950,9 +951,8 @@ OCI_SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd 
 PROMPT=true
 GO_BACKGROUND=Y
 REMAP_PDBS=""
-RESTART_POST_UPGRADE=N
 
-while getopts 's:d:t:p:i:nFM:Rh' c
+while getopts 's:d:t:p:i:nFM:h' c
 do
   case $c in
     s) OCI_SOURCE_DB_NAME=$OPTARG ;;
@@ -963,7 +963,6 @@ do
     i) OCI_DBID=$OPTARG ;;
     F) GO_BACKGROUND=N ;;
     M) REMAP_PDBS=$OPTARG ;;
-    R) RESTART_POST_UPGRADE=Y ;;
     h|?) usage ;;
   esac
 done
@@ -996,14 +995,13 @@ set -o pipefail
 Parameters :
 ==========
 
-    - Source DATABASE      : $OCI_SOURCE_DB_NAME
-    - Target DATABASE      : $OCI_TARGET_DB_NAME
-    - Target DB DOMAIN     : $SAVED_DOMAIN
-    - Source DBID          : $OCI_DBID
-    - Parallel             : $OCI_RMAN_PARALLELISM
-    - PITR Date            : $OCI_BKP_DATE
-    - PDBs renaming        : $REMAP_PDBS
-    - RESTART_POST_UPGRADE : $RESTART_POST_UPGRADE
+    - Source DATABASE    : $OCI_SOURCE_DB_NAME
+    - Target DATABASE    : $OCI_TARGET_DB_NAME
+    - Target DB DOMAIN   : $SAVED_DOMAIN
+    - Source DBID        : $OCI_DBID
+    - Parallel           : $OCI_RMAN_PARALLELISM
+    - PITR Date          : $OCI_BKP_DATE
+    - PDBs renaming      : $REMAP_PDBS
    "
   #  
   #    Verify environment and try o get the spfile from backups, if this 
@@ -1011,72 +1009,75 @@ Parameters :
   # the TNSNAMES configuration, but we cannot verify it at this stage 
   #
 
+  echo "Set ENV"
+  . $HOME/$OCI_TARGET_DB_NAME.env || die "Env file ($HOME/$OCI_TARGET_DB_NAME.env) not found"
   startStep "Initial verifications"
   init
   endStep
 
-  if [ "$RESTART_POST_UPGRADE" = "N" ]
+  if  [ "$GO_BACKGROUND" = "Y" ]
   then
-    if  [ "$GO_BACKGROUND" = "Y" ]
-    then
-      #
-      #     A soon as the prerequisites are verified, the scrit can be re-launched in batch 
-      #
-      echo
-      echo "+===========================================================================+"
-      echo "|       Main verifications have been made, and source DB has been dropped   |"
-      echo "| The script will be re-leunched in background with the same parameters     |"
-      echo "+===========================================================================+"
-      echo
-      echo "  LOG FILE will be :"
-      echo "   $LOG_FILE"
-      echo 
-      echo "+===========================================================================+"
-      #
-      #     On exporte les variables afin qu'elles soient reprises dans le script
-      #
-      rm -f $LOG_FILE
-      nohup $0 $* -n -F >/dev/null 2>&1 &
-      pid=$!
-      waitFor=30
-      echo " Script launched ..... (pid=$pid) monitoring for ($waitFor) seconds"
-      echo -n "  Monitoring of $pid --> "
-      i=1
-      while [ $i -le $waitFor ]
-      do
-        sleep 1
-        if ps -p $pid >/dev/null
-        then
-          [ $(($i % 10)) -eq 0 ] && { echo -n "+" ; } || { echo -n "." ; }
-        else
-           echo "Process has stopped (probable error) "
-           echo 
-           echo "      --+--> End of the log file"
-           tail -15 $LOG_FILE | sed -e "s;^;        | ;"
-           echo "        +----------------------"
-  
-           die "Duplication if not successfully launched"
-        fi
-        i=$(($i + 1))
-      done  
-      echo
-      echo
-      echo "+===========================================================================+"
-      echo "Database duplication has been launched in background"
-      echo "+===========================================================================+"
-      exit
-    fi
-
     #
-    #    Removes the database files from ASM
+    #     A soon as the prerequisites are verified, the scrit can be re-launched in batch 
     #
-    startStep "Remove target database" 
-    dropDatabase
-    endStep
+    echo
+    echo "+===========================================================================+"
+    echo "|       Main verifications have been made, and source DB has been dropped   |"
+    echo "| The script will be re-leunched in background with the same parameters     |"
+    echo "+===========================================================================+"
+    echo
+    echo "  LOG FILE will be :"
+    echo "   $LOG_FILE"
+    echo 
+    echo "+===========================================================================+"
+    #
+    #     On exporte les variables afin qu'elles soient reprises dans le script
+    #
+    rm -f $LOG_FILE
+    nohup $0 $* -n -F >/dev/null 2>&1 &
+    pid=$!
+    waitFor=30
+    echo " Script launched ..... (pid=$pid) monitoring for ($waitFor) seconds"
+    echo -n "  Monitoring of $pid --> "
+    i=1
+    while [ $i -le $waitFor ]
+    do
+      sleep 1
+      if ps -p $pid >/dev/null
+      then
+        [ $(($i % 10)) -eq 0 ] && { echo -n "+" ; } || { echo -n "." ; }
+      else
+         echo "Process has stopped (probable error) "
+         echo 
+         echo "      --+--> End of the log file"
+         tail -15 $LOG_FILE | sed -e "s;^;        | ;"
+         echo "        +----------------------"
 
-    startStep "SPFILE restore"
+         die "Duplication if not successfully launched"
+      fi
+      i=$(($i + 1))
+    done  
+    echo
+    echo
+    echo "+===========================================================================+"
+    echo "Database duplication has been launched in background"
+    echo "+===========================================================================+"
+    exit
+  fi
 
-    spFileRestore || die "Error restoring the SPFILE
+if true
+then
+#
+#    Removes the database files from ASM
+#
+  startStep "Remove target database" 
+  dropDatabase
+  endStep
+
+  startStep "SPFILE restore"
+
+
+  spFileRestore || die "Error restoring the SPFILE
 
    Most frequent errors at this stage :
    - opc backup config incorrect in 
@@ -1088,38 +1089,42 @@ Parameters :
    $(cat $TNS_ADMIN/sqlnet.ora | sed -e "/ENCRYPTION_WALLET_LOCATION/ p" \
                                   -e "1, /ENCRYPTION_WALLET_LOCATION/ d" \
                                   -e "/^ *$/,$ d")
+   TNS_ADMIN=$TNS_ADMIN
+   OCI_TARGET_DB_NAME=$OCI_TARGET_DB_NAME
 "
-    endStep
+%%
+  endStep
 
-    startStep "Restore the controlfile"
-    controlFileRestore  || die "Control file not restored, aborting"
-    endStep
+  startStep "Restore the controlfile"
+  controlFileRestore  || die "Control file not restored, aborting"
+  endStep
 
-    #
-    #     RMAN restore, this step supposes that the database is accessible via the TNS Alias
-    #
-    startStep "Database restore"
-    rmanConfig || die "RMAN configutation failed"
-    databaseRestoreAndRecover || die "Database restoration failed"
-    endStep
-  fi
-  UPGRADED=N
+#
+#     RMAN restore, this step supposes that the database is accessible via the TNS Alias
+#
+  startStep "Database restore"
+  rmanConfig || die "RMAN configutation failed"
+  databaseRestoreAndRecover || die "Database restoration failed"
+  endStep
+fi
+
+ #
+ #    Set env in a "normal" way
+ #
+ . $HOME/$OCI_TARGET_DB_NAME.env || die "Unable to set the environmenti (Final)"
+
+ UPGRADED=N
   if needsUpgrade
   then
-    if [ "$RESTART_POST_UPGRADE" = "N" ]
-    then
-      startStep "Post-restore Tasks (PRE-UPGRADE)"
-      postRestore_CreateCtr Y
-      endStep
-      startStep "Upgrade the database"
-      upgradeDB
-    else
-      startStep "Finish the process after a manual upgrade"
-    fi
-    postRestore_RemoveSubsbcribers 
+    #startStep "Post-restore Tasks (PRE-UPGRADE)"
+    #postRestore_CreateCtr Y
+    #endStep
+    #startStep "Upgrade the database"
+    #upgradeDB
+    #postRestore_RemoveSubsbcribers 
     UPGRADED=Y
-    endStep
-    exec_sql "/ as sysdba" "shutdown abort" "Shutdown abort"
+    #endStep
+# OK, tested on 2022 01 26
     startStep "Post-restore Tasks (POST-UPGRADE)"
     postRestore_ChangeDBName 
     postRestore_Restart
