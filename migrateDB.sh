@@ -256,6 +256,15 @@ Prompt COMPATIBLE=19.0.0
 alter system set sga_max_size=200G scope=spfile ;
 Prompt ADAPTIVE_PLANS=FALSE
 alter system set optimizer_adaptive_plans=false scope=spfile ;
+alter system set COMPATIBLE = '19.0.0' scope=spfile;
+
+prompt hidden parameters
+alter system set \"_adaptive_window_consolidator_enabled\" = FALSE scope=spfile ;
+alter system set \"_assm_segment_repair_bg\" = FALSE scope=spfile ;
+alter system set \"_gc_policy_time\" = 0 scope=spfile ;
+alter system set \"_lm_drm_disable\" = 7 scope=spfile ;
+alter system set \"_parallel_adaptive_max_users\" = 2 scope=spfile ;
+alter system set \"_unused_block_compression\" = FALSE scope=spfile ;
 
 
 " || die "There was a problem activating FIX_CONTROLS or parameters"
