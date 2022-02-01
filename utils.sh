@@ -56,6 +56,7 @@ echo \"copy the tar file on the source and place files in the required folders\"
              ie : 
           
    mkdir -p $OCI_BKP_ROOT_DIR/opc_wallet/${OCI_SOURCE_DB_NAME}
+   mkdir -p $OCI_BKP_ROOT_DIR/config
    cd $OCI_BKP_ROOT_DIR/opc_wallet/${OCI_SOURCE_DB_NAME}
    tar xvzf /tmp/opc_$OCI_SOURCE_DB_NAME.tgz
    mv opc${OCI_SOURCE_DB_NAME}.ora $OCI_BKP_CONFIG_DIR/opc${OCI_SOURCE_DB_NAME}.ora
@@ -110,11 +111,13 @@ if [[ -z $OCI_BKP_DB_UNIQUE_NAME || -z $OCI_BKP_ORACLE_HOME ]]; then
 else
 	export ORACLE_HOME=$OCI_BKP_ORACLE_HOME
 	export PATH=$ORACLE_HOME/bin:$PATH
+        export TNS_ADMIN=$OCI_BKP_ROOT_DIR/tns/$OCI_TARGET_DB_NAME
 	SHORT_HOSTNAME=$(hostname -s)
 	export ORACLE_SID=${1}${SHORT_HOSTNAME: -1}
 	log_info "Environment is : "
 	echo "ORACLE_HOME     : $ORACLE_HOME"
 	echo "ORACLE_SID      : $ORACLE_SID"
+        echo "TNS_ADMIN       : $TNS_ADMIN"
 fi
 
 log_success "Database $1 is present in /etc/oratab"
@@ -138,7 +141,7 @@ log_success "Local SCAN address is : $OCI_SCAN_ADDR"
 create_check_tns(){
 log_info "Checking or creating tnsnames.ora for $1"
 if [ ! -d $OCI_BKP_TNS_DIR/$1 ]; then
-	mkdir $OCI_BKP_TNS_DIR/$1
+	mkdir -p $OCI_BKP_TNS_DIR/$1
 fi
 
 domain=$(srvctl config database -d ${OCI_BKP_DB_UNIQUE_NAME} | grep -i domain | cut -f2 -d: | sed -e "s; ;;g") || \
@@ -246,8 +249,17 @@ fi
 }
 
 check_cred() {
-$ORACLE_HOME/bin/mkstore -wrl $OCI_BKP_CREDWALLET_DIR -listCredential | grep "^[0-9]" | grep -i $1 |grep -v RC$1 > /dev/null 2>&1
-if [ $? -ne 0 ]; then
+mkdir -p $OCI_BKP_CREDWALLET_DIR
+ERR=0
+if [ ! -f $OCI_BKP_CREDWALLET_DIR/cwallet.sso ]
+then
+  log_info "New cred wallet created"
+  $ORACLE_HOME/bin/mkstore -wrl $OCI_BKP_CREDWALLET_DIR -createALO
+  ERR=1
+fi
+[ "$ERR" = "0" ] && $ORACLE_HOME/bin/mkstore -wrl $OCI_BKP_CREDWALLET_DIR -listCredential | grep "^[0-9]" | grep -i $1 |grep -v RC$1 >/dev/null 2>&1 || false
+if [ $? -ne 0 ]
+then
 	log_error "No Entry for $1 in wallet $OCI_BKP_CREDWALLET_DIR. Please add the entry using mkstore command"
 	return 1
 else
